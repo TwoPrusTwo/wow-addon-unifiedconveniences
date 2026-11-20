@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: Unified Conveniences
+## IconTexture: 3610516
+## Notes: Shows zeppelin destinations on tooltips and friendly nameplates.
+## Version: 0.0.1
+## Author: TwoPrusTwo
+## SavedVariables: UCDB
+
+ZeppelinDestinations.lua
+Core.lua
