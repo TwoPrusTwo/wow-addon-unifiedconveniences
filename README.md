@@ -10,7 +10,7 @@ A lightweight WoW: Forever QoL addon.
 
 ## Installation
 
-1. opy `UnifiedConveniences/` into `World of Warcraft/_forever_/Interface/AddOns/`
+1. Copy `UnifiedConveniences/` into `World of Warcraft/_forever_/Interface/AddOns/`
 2. Enable **Unified Conveniences** in the character selection **AddOns** list
 3. `/reload` to reload AddOns if the game was running
 4. In game, open **Options → AddOns → Unified Conveniences**. Under **Nameplates → NPC**, check **Zeppelin Destinations** (off by default). Enable friendly nameplates for labels in the game world.
