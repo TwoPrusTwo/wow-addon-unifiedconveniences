@@ -7,9 +7,9 @@ A lightweight WoW: Forever QoL addon.
 - Shows destinations for Zeppelin Masters on mouseover tooltips and on friendly nameplates.
     - Adjusts label position with horizontal and vertical sliders (default: 0, 10).
 
-<center>
+<p align="center">
   <img src="/.previews/zeppelin-destinations-12136.png" alt="Snurk Bucksquick with zeppelin master destination."/>
-</center>
+</p>
 
 ## Installation
 
