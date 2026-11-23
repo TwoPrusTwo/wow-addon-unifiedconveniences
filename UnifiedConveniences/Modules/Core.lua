@@ -524,10 +524,10 @@ local function CreateTrackingRows(body, selectionY, tracking)
     end
 end
 
-local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking)
+local function CreateOptionsPanel(panelTitle)
     local panel = CreateFrame("Frame")
     panel:Hide()
-    AddText(panel, title, "GameFontHighlightHuge", 7, -22)
+    AddText(panel, panelTitle, "GameFontHighlightHuge", 7, -22)
     local divider = panel:CreateTexture(nil, "ARTWORK")
     divider:SetAtlas("Options_HorizontalDivider", true)
     divider:SetPoint("TOP", panel, "TOP", 0, -50)
@@ -536,13 +536,37 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     defaultsButton:SetSize(96, 22)
     defaultsButton:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -36, -16)
     defaultsButton:SetText("Defaults")
+    return panel, defaultsButton
+end
 
+local function RegisterDebugOptions(parentCategory, settings, setSimpleNameplatesEnabled)
+    local panel, defaultsButton = CreateOptionsPanel("Debug")
+    local body = CreateSettingsBody(panel)
+    local label = "Simple Nameplates"
+    local row = CreateSettingRow(body, label, -settingsListPadding)
+    local checkbox = CreateCheckbox(row, label, "Allow nearby simple plates when native and addon nameplates are off.", setSimpleNameplatesEnabled)
+    body:SetHeight(settingsRowHeight + settingsListPadding * 2)
+
+    local function RefreshOptions()
+        checkbox:SetChecked(settings.enabled)
+    end
+    defaultsButton:SetScript("OnClick", function()
+        setSimpleNameplatesEnabled(true)
+        RefreshOptions()
+    end)
+    panel:SetScript("OnShow", RefreshOptions)
+    RefreshOptions()
+    Settings.RegisterCanvasLayoutSubcategory(parentCategory, panel, "Debug")
+end
+
+local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
+    local panel, defaultsButton = CreateOptionsPanel(title)
     local body = CreateSettingsBody(panel)
     local indicators = db.friendlyIndicators
     local indicatorsTitle = "Friendly Indicators"
     local y = CreateSectionHeading(body, indicatorsTitle, -settingsListPadding)
     local indicatorsRow = CreateSettingRow(body, indicatorsTitle, y)
-    local indicatorsCheckbox = CreateCheckbox(indicatorsRow, indicatorsTitle, "Show symbols above friendly player names. In the open world, this can temporarily enable name-only plates when friendly player nameplates are off.", function(value)
+    local indicatorsCheckbox = CreateCheckbox(indicatorsRow, indicatorsTitle, "Show symbols above friendly player names. In the open world, simple names can appear when game and addon nameplates are off.", function(value)
         indicators.enabled = value
         refreshIndicators()
     end)
@@ -566,7 +590,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     local zeppelinTitle = "Zeppelin Destinations"
     y = CreateSectionHeading(body, zeppelinTitle, nextSectionY)
     local zeppelinRow = CreateSettingRow(body, zeppelinTitle, y)
-    local zeppelinCheckbox = CreateCheckbox(zeppelinRow, zeppelinTitle, "Show Zeppelin Master destinations on nameplates and in mouseover tooltips. In the open world, this can temporarily enable friendly NPC nameplates.", function(value)
+    local zeppelinCheckbox = CreateCheckbox(zeppelinRow, zeppelinTitle, "Show Zeppelin Master destinations on nameplates and in mouseover tooltips. In the open world, simple NPC names can appear when game and addon nameplates are off.", function(value)
         db.showZeppelinDestination = value
         refreshNameplates()
     end)
@@ -601,6 +625,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         ApplyDefaults(db, defaults, true)
         ApplyIndicatorDefaults(indicators, true)
         tracking.Reset()
+        setSimpleNameplatesEnabled(true)
         RefreshOptions()
         refreshNameplates()
         refreshIndicators()
@@ -614,6 +639,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
 
     local category = Settings.RegisterCanvasLayoutCategory(panel, title)
     Settings.RegisterAddOnCategory(category)
+    RegisterDebugOptions(category, db.simpleNameplates, setSimpleNameplatesEnabled)
     return category
 end
 
@@ -636,11 +662,12 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
     end
     ApplyIndicatorDefaults(db.friendlyIndicators)
 
+    local setSimpleNameplatesEnabled = addon.InitializeSimpleNameplates(db)
     local preview = {}
     local refreshNameplates = addon.InitializeZeppelinDestinations(db, defaults.zeppelinVerticalOffset)
     local refreshIndicators = addon.InitializeFriendlyIndicators(db.friendlyIndicators, preview)
     local tracking = addon.InitializeTrackingManager(db)
-    local category = RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking)
+    local category = RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
     addon.CreateTrackingMinimapButton(tracking.PopulateMenu, function()
         Settings.OpenToCategory(category:GetID())
     end)

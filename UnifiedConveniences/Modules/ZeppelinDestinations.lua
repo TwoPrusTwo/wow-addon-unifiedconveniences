@@ -1,5 +1,6 @@
 local _, addon = ...
 
+local targetPlateRetryDelay = .1
 local destinations = {
     [9564] = "Undercity",           -- Frezza
     [12136] = "Grom'gol Base Camp", -- Snurk Bucksquick
@@ -9,7 +10,7 @@ local destinations = {
     [12137] = "Undercity",          -- Squibby Overspeck
 }
 
-local function GetDestinationTitle(guid)
+local function GetDestination(guid)
     if type(guid) ~= "string" or issecretvalue(guid) then
         return
     end
@@ -17,10 +18,14 @@ local function GetDestinationTitle(guid)
     -- A creature GUID ends with the NPC ID followed by the spawn ID.
     local npcID = guid:match("^Creature%-%d+%-%d+%-%d+%-%d+%-(%d+)%-%x+$")
     if npcID then
-        local destination = destinations[tonumber(npcID)]
-        if destination then
-            return "<" .. destination .. " Zeppelin Master>"
-        end
+        return destinations[tonumber(npcID)]
+    end
+end
+
+local function GetDestinationTitle(guid)
+    local destination = GetDestination(guid)
+    if destination then
+        return "<" .. destination .. " Zeppelin Master>"
     end
 end
 
@@ -89,8 +94,13 @@ function addon.InitializeZeppelinDestinations(db, defaultVerticalOffset)
         end
         ClearNameplateTitle(unit)
         local title = GetDestinationTitle(UnitGUID(unit))
-        local isFriendly = title and UnitIsFriend("player", unit)
-        if not title or issecretvalue(isFriendly) or isFriendly ~= true then
+        if not title then
+            nameplateMode:ReleasePlate(plate)
+            return
+        end
+        local isFriendly = UnitIsFriend("player", unit)
+        local isPlayer = UnitIsPlayer(unit)
+        if issecretvalue(isFriendly) or isFriendly ~= true or issecretvalue(isPlayer) or isPlayer ~= false then
             nameplateMode:ReleasePlate(plate)
             return
         end
@@ -133,15 +143,44 @@ function addon.InitializeZeppelinDestinations(db, defaultVerticalOffset)
 
     nameplateMode = addon.CreateSimpleNameplateMode("npc", db.zeppelinNameplateMode, function()
         return db.showZeppelinDestination
-    end, RefreshNameplates)
+    end, RefreshNameplates, function(unit)
+        return GetDestination(UnitGUID(unit)) ~= nil
+    end)
 
     local events = CreateFrame("Frame")
     events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
     events:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
     events:RegisterEvent("UNIT_NAME_UPDATE")
+    events:RegisterEvent("PLAYER_TARGET_CHANGED")
     events:RegisterEvent("UI_SCALE_CHANGED")
     events:RegisterEvent("DISPLAY_SIZE_CHANGED")
+    local targetRefreshQueued = false
+    local function RefreshTargetTitle(retry)
+        targetRefreshQueued = false
+        if not db.showZeppelinDestination then
+            return
+        end
+        local plate = C_NamePlate.GetNamePlateForUnit("target")
+        if plate then
+            UpdateNameplateTitle(plate)
+        elseif retry then
+            local exists = UnitExists("target")
+            if not issecretvalue(exists) and exists then
+                targetRefreshQueued = true
+                C_Timer.After(targetPlateRetryDelay, function() RefreshTargetTitle(false) end)
+            end
+        end
+    end
+
     events:SetScript("OnEvent", function(_, event, unit)
+        if event == "PLAYER_TARGET_CHANGED" then
+            if db.showZeppelinDestination and not targetRefreshQueued then
+                targetRefreshQueued = true
+                -- The native frame can finish binding after the target event.
+                C_Timer.After(0, function() RefreshTargetTitle(true) end)
+            end
+            return
+        end
         if event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
             if db.showZeppelinDestination then
                 RefreshNameplates()

@@ -4,7 +4,6 @@ local styles = {
     player = {
         isPlayer = true,
         visibilityCVar = "nameplateShowFriendlyPlayers",
-        nameOnlyCVar = "nameplateShowOnlyNameForFriendlyPlayerUnits",
         fallbackColour = CreateColorFromHexString("FF8686FF"),
     },
     npc = {
@@ -65,33 +64,6 @@ local function GetWritableSetting(name)
     return value
 end
 
-local function HasFriendlyPlates(isPlayer)
-    local playerGUID = isPlayer and GetReadableGUID("player")
-    for _, plate in pairs(C_NamePlate.GetNamePlates()) do
-        if plate:IsForbidden() or not plate.GetUnit then
-            return true
-        end
-        local unit = plate:GetUnit()
-        if not IsReadable(unit, "string") then
-            return true
-        end
-        local player = UnitIsPlayer(unit)
-        if not IsReadable(player, "boolean") then
-            return true
-        end
-        if player == isPlayer then
-            local friendly = UnitIsFriend("player", unit)
-            if not IsReadable(friendly, "boolean") then
-                return true
-            end
-            if friendly and (not playerGUID or GetReadableGUID(unit) ~= playerGUID) then
-                return true
-            end
-        end
-    end
-    return false
-end
-
 local function GetOverheadColour(unit, style)
     local r, g, b = UnitSelectionColor(unit, style.isPlayer)
     if IsReadable(r, "number") and IsReadable(g, "number") and IsReadable(b, "number") then
@@ -107,337 +79,782 @@ local function GetGuildTitle(unit)
     end
 end
 
-function addon.CreateSimpleNameplateMode(kind, saved, isEnabled, refreshPlates)
-    local mode = {}
-    local style = styles[kind]
-    local visibilityCVar, nameOnlyCVar = style.visibilityCVar, style.nameOnlyCVar
-    local managedCVars = { visibilityCVar, nameOnlyCVar }
-    local managedKeys = {}
-    for _, name in ipairs(managedCVars) do
-        managedKeys[name:lower()] = true
-    end
-    local displays, displayedUnits = {}, {}
-    local active, ready, stopping, writing, queued = false, false, false, false, false
-    local waitingForPlates, takeoverFailed = false, false
-    local enabled = isEnabled()
+local alwaysShow = "nameplateShowAll"
+local enemyVisibilityCVar = "nameplateShowEnemies"
+local visibilityKeys = {
+    alwaysShow,
+    enemyVisibilityCVar,
+    styles.player.visibilityCVar,
+    styles.npc.visibilityCVar,
+    "nameplateShowSelf",
+}
+local nameOnly = "nameplateShowOnlyNameForFriendlyPlayerUnits"
+local watchedKeys = { [nameOnly:lower()] = true }
+for _, name in ipairs(visibilityKeys) do
+    watchedKeys[name:lower()] = true
+end
 
-    local function ReleaseDisplay(display)
-        if not display.unit then
+-- A loaded nameplate replacement can control visibility without writing a CVar.
+local nameplateAddons = {
+    "BetterBlizzPlates", "DenoNameplate", "EllesmereUINameplates", "ElvUI",
+    "Kui_Nameplates", "NeatPlates", "Platynator", "Plater", "SmartFriendlyNameplates",
+    "ThreatPlates", "TidyPlates", "TidyPlates_ThreatPlates", "Tukui",
+}
+
+local baseFontSize = 14
+local maximumFontSize = 36
+local closeCameraDepth = 5
+local fallbackCameraZoom = 15
+local scaleResponseTime = .06
+local settledScaleDelta = .001
+local rangeCheckInterval = .1
+local closeRangeIndex, followRangeIndex = 3, 4
+local closeUnitDistance, middleUnitDistance, farUnitDistance = 0, 14, 32
+local plateRetryDelay = .1
+
+local function IsDistance(value)
+    return IsReadable(value, "number") and value >= 0 and value < math.huge
+end
+
+local function GetReadableCameraZoom()
+    local zoom = GetCameraZoom()
+    if IsDistance(zoom) then
+        return zoom
+    end
+end
+
+local function CanCheckInteractionRange()
+    local combat = UnitAffectingCombat("player")
+    return IsReadable(combat, "boolean") and not combat and not InCombatLockdown()
+end
+
+local function GetUnitDistance(unit, canCheckInteractionRange)
+    local squared, checked = UnitDistanceSquared(unit)
+    if IsReadable(checked, "boolean") and checked and IsDistance(squared) then
+        return math.sqrt(squared)
+    end
+    if canCheckInteractionRange then
+        -- Exact distance is normally available only for group members.
+        local close = CheckInteractDistance(unit, closeRangeIndex)
+        if not issecretvalue(close) and close then
+            return closeUnitDistance
+        end
+        local withinFollowRange = CheckInteractDistance(unit, followRangeIndex)
+        if not issecretvalue(close) and not issecretvalue(withinFollowRange) then
+            return withinFollowRange and middleUnitDistance or farUnitDistance
+        end
+    end
+end
+
+local function GetTextScale(zoom, distance)
+    -- Camera zoom and unit range are both measured from the player.
+    local depth = closeCameraDepth + zoom + (distance or middleUnitDistance)
+    return maximumFontSize * closeCameraDepth / (baseFontSize * depth)
+end
+
+local function CreateOverheadText(plate)
+    local label = plate:CreateFontString(nil, "OVERLAY", "SystemFont_NamePlate")
+    label:SetWordWrap(false)
+    label:SetSmoothScaling(true)
+    return label
+end
+
+local function AnchorSubtitle(display)
+    -- Keep configured offsets in plate units while the subtitle region scales.
+    local scale = display.textScale
+    display.subtitle:SetPoint("TOP", display.name, "BOTTOM", display.subtitleX / scale, display.subtitleY / scale)
+end
+
+local function HasNameplateAddon()
+    for _, name in ipairs(nameplateAddons) do
+        if C_AddOns.IsAddOnLoaded(name) then
+            return true
+        end
+    end
+    return false
+end
+
+local function GetUnitForPlate(plate)
+    if not plate or plate:IsForbidden() or not plate.GetUnit then
+        return
+    end
+    local unit = plate:GetUnit()
+    if IsReadable(unit, "string") then
+        return unit
+    end
+end
+
+local function IsNativePlateVisible(plate)
+    if plate:IsForbidden() then
+        return true
+    end
+    local frame = plate.UnitFrame
+    local visible = plate:IsVisible()
+    if not frame or (IsReadable(visible, "boolean") and not visible) then
+        return false
+    end
+    if frame:IsForbidden() then
+        return true
+    end
+    local alpha = frame:GetEffectiveAlpha()
+    visible = frame:IsVisible()
+    return (not IsReadable(visible, "boolean") or visible) and (not IsReadable(alpha, "number") or alpha > 0)
+end
+
+local function GetPlateName(unit, nativeName)
+    local text = nativeName:GetText()
+    if not IsReadable(text, "string") or text == "" then
+        text = GetUnitName(unit, false)
+    end
+    if IsReadable(text, "string") and text ~= "" then
+        return text
+    end
+end
+
+local function IsTarget(unit)
+    local exists = UnitExists("target")
+    if not IsReadable(exists, "boolean") then
+        return
+    end
+    if not exists then
+        return false
+    end
+    local matches = UnitIsUnit(unit, "target")
+    if IsReadable(matches, "boolean") then
+        return matches
+    end
+end
+
+local function GetFriendlyKind(unit)
+    local friendly = UnitIsFriend("player", unit)
+    local player = UnitIsPlayer(unit)
+    if not IsReadable(friendly, "boolean") or not IsReadable(player, "boolean") then
+        return nil, false
+    end
+    if not friendly then
+        return nil, true
+    end
+    if not player then
+        return "npc", true
+    end
+    local guid, ownGUID = GetReadableGUID(unit), GetReadableGUID("player")
+    if not guid or not ownGUID then
+        return nil, false
+    end
+    return guid ~= ownGUID and "player" or nil, true
+end
+
+function addon.InitializeSimpleNameplates(db)
+    local modes, displays, displayedUnits = {}, {}, {}
+    local saved = type(db.simpleNameplates) == "table" and db.simpleNameplates or {}
+    db.simpleNameplates = saved
+    if type(saved.enabled) ~= "boolean" then
+        saved.enabled = true
+    end
+    local active, ready, stopped, transitioning, queued, yielded
+    local settingsPanel
+    local expectedVisibility, pauseInCombat
+    local pendingUnits, plateRetry = {}, nil
+    local waitingForReadyPlate = false
+    local visibleSimpleCount = 0
+    local cameraZoom, rangeElapsed, scaling = fallbackCameraZoom, 0, false
+    local events = CreateFrame("Frame")
+
+    local function WriteSetting(name, value)
+        if not GetWritableSetting(name) then
+            return false
+        end
+        pcall(C_CVar.SetCVar, name, value)
+        return C_CVar.GetCVar(name) == value
+    end
+
+    local function RestoreSettings(store)
+        local pending = store.nameplateRestore
+        if type(pending) ~= "table" then
+            store.nameplateRestore = nil
+            return true
+        end
+        local playerGUID = GetReadableGUID("player")
+        for name, entry in pairs(pending) do
+            if type(entry) == "table" and entry.value == "0" then
+                if entry.player and entry.player ~= playerGUID then
+                    return false
+                end
+                local current = C_CVar.GetCVar(name)
+                if not IsReadable(current, "string") or (current == "1" and not WriteSetting(name, "0")) then
+                    return false
+                end
+            end
+            pending[name] = nil
+        end
+        store.nameplateRestore = nil
+        return true
+    end
+
+    local function RefreshTextScale(_, elapsed)
+        rangeElapsed = rangeElapsed + elapsed
+        local checkDistances = rangeElapsed >= rangeCheckInterval
+        local zoom = GetReadableCameraZoom() or cameraZoom
+        if not checkDistances and not scaling and zoom == cameraZoom then
             return
         end
-        if not IsForbidden(display.hiddenRegion) then
-            local alpha = display.hiddenRegion:GetAlpha()
-            if IsReadable(alpha, "number") and alpha == 0 then
-                display.hiddenRegion:SetAlpha(display.originalAlpha)
+        cameraZoom = zoom
+        scaling = false
+        if checkDistances then
+            rangeElapsed = 0
+        end
+        local canCheckInteractionRange = checkDistances and CanCheckInteractionRange()
+        local blend = 1 - math.exp(-elapsed / scaleResponseTime)
+        for _, display in pairs(displayedUnits) do
+            if display.textScale then
+                if checkDistances then
+                    display.distance = GetUnitDistance(display.unit, canCheckInteractionRange) or display.distance
+                end
+                local targetScale = GetTextScale(cameraZoom, display.distance)
+                local delta = targetScale - display.textScale
+                if delta ~= 0 then
+                    local scale = targetScale
+                    if math.abs(delta) > settledScaleDelta then
+                        scale = display.textScale + delta * blend
+                        scaling = true
+                    end
+                    display.textScale = scale
+                    display.name:SetScale(scale)
+                    if display.subtitle and display.subtitle:IsShown() then
+                        display.subtitle:SetScale(scale)
+                        if display.subtitleX ~= 0 or display.subtitleY ~= 0 then
+                            AnchorSubtitle(display)
+                        end
+                    end
+                end
             end
         end
-        display.name:Hide()
+    end
+
+    local function ReleaseDisplay(display)
+        if not display or not display.unit then
+            return
+        end
+        local region = display.hiddenRegion
+        if not IsForbidden(region) then
+            local alpha = region:GetAlpha()
+            if IsReadable(alpha, "number") and alpha == 0 then
+                pcall(region.SetAlpha, region, display.originalAlpha)
+            end
+        end
+        if display.name then
+            display.name:Hide()
+        end
         if display.subtitle then
             display.subtitle:Hide()
         end
+        if display.kind then
+            visibleSimpleCount = visibleSimpleCount - 1
+            if visibleSimpleCount == 0 then
+                events:SetScript("OnUpdate", nil)
+                rangeElapsed, scaling = 0, false
+            end
+        end
         displayedUnits[display.unit] = nil
-        display.unit, display.guid, display.native, display.hiddenRegion = nil, nil, nil, nil
-        display.originalAlpha = nil
+        display.unit, display.guid, display.kind, display.hiddenRegion = nil, nil, nil, nil
+        display.distance, display.textScale = nil, nil
     end
 
-    local function ReleaseDisplays()
+    local function RefreshOverlays()
+        for _, mode in pairs(modes) do
+            mode.refreshPlates()
+        end
+    end
+
+    local function Stop()
+        local wasActive = active
+        active = false
+        expectedVisibility, pauseInCombat = nil, nil
+        if plateRetry then
+            plateRetry:Cancel()
+            plateRetry = nil
+        end
+        pendingUnits = {}
+        transitioning = true
         for _, display in pairs(displayedUnits) do
             ReleaseDisplay(display)
         end
+        local restored = RestoreSettings(saved)
+        transitioning = false
+        if wasActive then
+            RefreshOverlays()
+        end
+        return restored
     end
 
-    function mode:ReleaseUnit(unit)
-        local display = displayedUnits[unit]
-        if display then
-            ReleaseDisplay(display)
-        end
+    local function Yield()
+        yielded = true
+        Stop()
     end
 
-    function mode:ReleasePlate(plate)
-        local display = displays[plate]
-        if display then
-            ReleaseDisplay(display)
-        end
-    end
-
-    function mode:UpdateName(plate, unit, nativeName, subtitle, x, y)
-        if not active then
-            return nativeName
-        end
+    local function HideNative(plate, unit, kind)
+        local region = plate.UnitFrame
         local guid = GetReadableGUID(unit)
-        local unitFrame = plate.UnitFrame
-        local widgetsOnly = unitFrame.widgetsOnlyMode
-        if not guid or IsForbidden(nativeName) or (not style.isPlayer and (issecretvalue(widgetsOnly) or widgetsOnly)) then
-            self:ReleasePlate(plate)
-            return nativeName
+        if not guid or not region or region:IsForbidden() then
+            return
         end
-
-        -- Forever's native name-only setting applies to players. Hide the NPC UnitFrame
-        -- with alpha so the nameplate remains available as an anchor.
-        local hiddenRegion = style.isPlayer and nativeName or unitFrame
         local display = displays[plate]
-        if display and display.unit and (display.unit ~= unit or display.guid ~= guid or display.native ~= nativeName) then
+        if display and display.unit
+            and (display.unit ~= unit or display.guid ~= guid or display.kind ~= kind or display.hiddenRegion ~= region) then
             ReleaseDisplay(display)
         end
         local previous = displayedUnits[unit]
         if previous and previous ~= display then
             ReleaseDisplay(previous)
         end
-
-        local text = nativeName:GetText()
-        if not IsReadable(text, "string") or text == "" then
-            text = GetUnitName(unit, false)
+        local alpha = region:GetAlpha()
+        if not IsReadable(alpha, "number") or (display and display.unit and alpha ~= 0)
+            or ((not display or not display.unit) and alpha <= 0) then
+            return
         end
-        local alpha = hiddenRegion:GetAlpha()
-        if not IsReadable(text, "string") or text == "" or not IsReadable(alpha, "number") then
-            self:ReleasePlate(plate)
-            return nativeName
-        end
-        -- Leave name regions being hidden or restyled by another addon alone.
-        if (display and display.unit and alpha ~= 0) or ((not display or not display.unit) and alpha == 0) then
-            self:ReleasePlate(plate)
-            if display then
-                display.externalGUID = guid
-            end
-            return nativeName
-        end
-        if display and display.externalGUID == guid then
-            return nativeName
-        end
-
         if not display then
-            display = { name = plate:CreateFontString(nil, "OVERLAY", "SystemFont_NamePlate") }
+            display = {}
             displays[plate] = display
         end
         if not display.unit then
-            display.unit, display.guid, display.native, display.hiddenRegion = unit, guid, nativeName, hiddenRegion
-            display.originalAlpha = alpha
-            display.externalGUID = nil
-            displayedUnits[unit] = display
-            display.name:ClearAllPoints()
-            display.name:SetPoint("CENTER", nativeName, "CENTER")
-            hiddenRegion:SetAlpha(0)
-        end
-
-        local font, size, flags = nativeName:GetFont()
-        if not IsReadable(font, "string") or not IsReadable(size, "number") then
-            font, size, flags = display.name:GetFont()
-        end
-        local hasFont = IsReadable(font, "string") and IsReadable(size, "number")
-        if hasFont then
-            flags = WithoutOutline(flags)
-            display.name:SetFont(font, size, flags)
-        end
-        local r, g, b = GetOverheadColour(unit, style)
-        display.name:SetText(text)
-        display.name:SetTextColor(r, g, b)
-        display.name:Show()
-
-        if style.isPlayer then
-            subtitle = GetGuildTitle(unit)
-        end
-        if subtitle then
-            if not display.subtitle then
-                display.subtitle = plate:CreateFontString(nil, "OVERLAY", "SystemFont_NamePlate")
-            end
-            x, y = x or 0, y or 0
-            if display.subtitleX ~= x or display.subtitleY ~= y then
-                display.subtitleX, display.subtitleY = x, y
-                display.subtitle:ClearAllPoints()
-                display.subtitle:SetPoint("TOP", display.name, "BOTTOM", x, y)
-            end
-            if hasFont then
-                display.subtitle:SetFont(font, size, flags)
-            end
-            display.subtitle:SetText(subtitle)
-            display.subtitle:SetTextColor(r, g, b)
-            display.subtitle:Show()
-        elseif display.subtitle then
-            display.subtitle:Hide()
-        end
-        return display.name
-    end
-
-    function mode:RefreshName(plate, nativeName)
-        local display = displays[plate]
-        if display and display.unit then
-            return self:UpdateName(plate, display.unit, nativeName)
-        end
-        return nativeName
-    end
-
-    local function WriteSetting(name, value)
-        if not GetWritableSetting(name) then
-            return false
-        end
-        writing = true
-        pcall(C_CVar.SetCVar, name, value)
-        writing = false
-        return C_CVar.GetCVar(name) == value
-    end
-
-    local function RestoreSettings()
-        local pending = saved.nameplateRestore
-        if type(pending) ~= "table" then
-            saved.nameplateRestore = nil
-            return true
-        end
-        local playerGUID = GetReadableGUID("player")
-        for _, name in ipairs(managedCVars) do
-            local entry = pending[name]
-            if type(entry) == "table" and entry.value == "0" then
-                if entry.player and entry.player ~= playerGUID then
-                    return false
-                end
-                local current = C_CVar.GetCVar(name)
-                if current ~= "0" and (current ~= "1" or not WriteSetting(name, entry.value)) then
-                    return false
-                end
-            end
-            pending[name] = nil
-        end
-        saved.nameplateRestore = nil
-        return true
-    end
-
-    local function StillOwnsSettings()
-        return C_CVar.GetCVar(visibilityCVar) == "1" and (not nameOnlyCVar or C_CVar.GetCVar(nameOnlyCVar) == "1")
-    end
-
-    local function Stop(restore)
-        local wasActive = active
-        if wasActive and not StillOwnsSettings() then
-            restore = false
-        end
-        active = false
-        ReleaseDisplays()
-        if wasActive then
-            for _, display in pairs(displays) do
-                display.externalGUID = nil
-            end
-        end
-        if restore then
-            RestoreSettings()
-        else
-            saved.nameplateRestore = nil
-            saved.yieldFriendlyNameplates = true
-        end
-        if wasActive and not stopping then
-            refreshPlates()
-        end
-    end
-
-    local function Reconcile()
-        if stopping or not ready then
-            return
-        end
-        local inInstance = IsInInstance()
-        if active then
-            if not isEnabled() or inInstance then
-                Stop(true)
-            elseif not StillOwnsSettings() then
-                Stop(false)
-            end
-            return
-        end
-        if not RestoreSettings() or not isEnabled() or saved.yieldFriendlyNameplates
-            or takeoverFailed or inInstance or InCombatLockdown() then
-            return
-        end
-
-        local visibility, visibilityPlayer = GetWritableSetting(visibilityCVar)
-        local nameOnly, nameOnlyPlayer
-        if nameOnlyCVar then
-            nameOnly, nameOnlyPlayer = GetWritableSetting(nameOnlyCVar)
-        end
-        if visibility ~= "0" or (nameOnlyCVar and not nameOnly) then
-            waitingForPlates = false
-            return
-        end
-        waitingForPlates = HasFriendlyPlates(style.isPlayer)
-        if waitingForPlates then
-            return
-        end
-
-        local pending = {}
-        saved.nameplateRestore = pending
-        if nameOnly == "0" then
-            pending[nameOnlyCVar] = { value = nameOnly, player = nameOnlyPlayer }
-            if not WriteSetting(nameOnlyCVar, "1") then
-                takeoverFailed = true
-                RestoreSettings()
+            local ok = pcall(region.SetAlpha, region, 0)
+            if not ok or region:GetAlpha() ~= 0 then
                 return
             end
+            display.unit, display.guid, display.kind = unit, guid, kind
+            display.hiddenRegion, display.originalAlpha = region, alpha
+            displayedUnits[unit] = display
+            if kind then
+                visibleSimpleCount = visibleSimpleCount + 1
+            end
         end
-        pending[visibilityCVar] = { value = visibility, player = visibilityPlayer }
-        if not WriteSetting(visibilityCVar, "1") then
-            takeoverFailed = true
-            RestoreSettings()
-            return
-        end
-        active = true
-        if StillOwnsSettings() then
-            refreshPlates()
-        else
-            Stop(false)
-        end
+        return display
     end
 
-    local function QueueReconcile()
-        if ready and not queued and not stopping then
-            queued = true
-            C_Timer.After(0, function()
-                queued = false
-                Reconcile()
+    local function FilterPlate(plate)
+        if plate and plate:IsForbidden() then
+            return false
+        end
+        local unit = GetUnitForPlate(plate)
+        if not unit then
+            return nil
+        end
+        local target = IsTarget(unit)
+        if target ~= false then
+            ReleaseDisplay(displays[plate])
+            return target == true
+        end
+        local kind, readable = GetFriendlyKind(unit)
+        if not readable then
+            return false
+        end
+        local display = displays[plate]
+        if (not display or not display.unit) and not IsNativePlateVisible(plate) then
+            return nil
+        end
+        local mode = modes[kind]
+        if mode and mode:IncludesUnit(unit) then
+            local unitFrame = plate.UnitFrame
+            if not unitFrame or not unitFrame.name then
+                return nil
+            end
+            if unitFrame:IsForbidden() or IsForbidden(unitFrame.name) then
+                return false
+            end
+            return GetPlateName(unit, unitFrame.name) and true or nil
+        end
+        local inCombat = UnitAffectingCombat("player")
+        if not IsReadable(inCombat, "boolean") then
+            return false
+        end
+        if inCombat then
+            ReleaseDisplay(displays[plate])
+            return true
+        end
+        if not plate.UnitFrame then
+            return nil
+        end
+        return HideNative(plate, unit, nil) ~= nil
+    end
+
+    local RefreshPlates
+
+    local function QueuePlateRetry(attempt)
+        if not plateRetry then
+            local delay = attempt == 1 and 0 or plateRetryDelay
+            plateRetry = C_Timer.NewTimer(delay, function()
+                plateRetry = nil
+                if active then
+                    RefreshPlates(attempt)
+                end
             end)
         end
     end
 
-    function mode:UpdateSettings()
-        local enabledNow = isEnabled()
-        if enabled == enabledNow then
-            return
+    function RefreshPlates(attempt)
+        if active then
+            local pending, unsafe = false, false
+            for unit in pairs(pendingUnits) do
+                if C_NamePlate.GetNamePlateForUnit(unit) then
+                    pendingUnits[unit] = nil
+                else
+                    pending = true
+                end
+            end
+            for _, plate in pairs(C_NamePlate.GetNamePlates()) do
+                local result = FilterPlate(plate)
+                if result == false then
+                    Yield()
+                    return
+                elseif result == nil then
+                    pending = true
+                    unsafe = unsafe or IsNativePlateVisible(plate)
+                end
+            end
+            if pending then
+                if attempt == 2 then
+                    -- A later native event can recover an incomplete plate. Do
+                    -- not leave an extra visible frame up while waiting for it.
+                    if unsafe then
+                        waitingForReadyPlate = true
+                        Stop()
+                        return
+                    end
+                else
+                    QueuePlateRetry(attempt and 2 or 1)
+                end
+            end
         end
-        enabled = enabledNow
-        saved.yieldFriendlyNameplates = nil
-        takeoverFailed = false
-        if enabled then
-            QueueReconcile()
-        else
-            Stop(true)
-        end
+        RefreshOverlays()
     end
 
-    local events = CreateFrame("Frame")
-    events:RegisterEvent("PLAYER_ENTERING_WORLD")
-    events:RegisterEvent("PLAYER_LEAVING_WORLD")
-    events:RegisterEvent("PLAYER_LOGOUT")
-    events:RegisterEvent("PLAYER_REGEN_ENABLED")
-    events:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
-    events:RegisterEvent("CVAR_UPDATE")
-    events:SetScript("OnEvent", function(_, event, name)
-        if event == "PLAYER_LOGOUT" then
-            stopping = true
-            Stop(true)
-        elseif event == "PLAYER_LEAVING_WORLD" then
+    local function RestoreLegacySettings()
+        for _, mode in pairs(modes) do
+            if not RestoreSettings(mode.legacy) then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function HasVisibilityChanged(expected)
+        for name, value in pairs(expected) do
+            local current = C_CVar.GetCVar(name)
+            if not IsReadable(current, "string") or current ~= value then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function CanAcquire()
+        local inCombat = UnitAffectingCombat("player")
+        if not saved.enabled or yielded or not settingsPanel or settingsPanel:IsShown() or IsInInstance() or InCombatLockdown()
+            or not IsReadable(inCombat, "boolean") or inCombat or HasNameplateAddon() then
+            return false
+        end
+        -- Existing untargeted plates may already be styled by WoW or an addon.
+        for _, plate in pairs(C_NamePlate.GetNamePlates()) do
+            if IsNativePlateVisible(plate) then
+                local unit = GetUnitForPlate(plate)
+                if not unit or IsTarget(unit) ~= true then
+                    return false
+                end
+            end
+        end
+        return true
+    end
+
+    local function Acquire()
+        local matchingCategories = {}
+        for kind, mode in pairs(modes) do
+            if mode.isEnabled() then
+                matchingCategories[styles[kind].visibilityCVar] = true
+            end
+        end
+        if not next(matchingCategories) or not CanAcquire() then
+            return
+        end
+
+        local expected, toEnable = {}, {}
+        local nativeCombatPlatesEnabled = false
+        for _, name in ipairs(visibilityKeys) do
+            local current = C_CVar.GetCVar(name)
+            if not IsReadable(current, "string") then
+                return
+            end
+            if current == "0" then
+                if name == alwaysShow or matchingCategories[name] then
+                    toEnable[#toEnable + 1] = name
+                    expected[name] = "1"
+                else
+                    expected[name] = "0"
+                end
+            elseif current == "1" and (matchingCategories[name] or name == enemyVisibilityCVar) then
+                -- WoW will use this category in combat even with Always Show off.
+                expected[name] = "1"
+                nativeCombatPlatesEnabled = true
+            else
+                return
+            end
+        end
+
+        local pending = {}
+        transitioning = true
+        saved.nameplateRestore = pending
+        for _, name in ipairs(toEnable) do
+            local current, player = GetWritableSetting(name)
+            if current ~= "0" then
+                Yield()
+                return
+            end
+            pending[name] = { value = current, player = player }
+            if not WriteSetting(name, "1") then
+                Yield()
+                return
+            end
+        end
+        if HasVisibilityChanged(expected) then
+            Yield()
+            return
+        end
+        expectedVisibility, pauseInCombat = expected, nativeCombatPlatesEnabled
+        active = true
+        transitioning = false
+        RefreshPlates()
+    end
+
+    local function QueueReconcile()
+        if queued or not ready or stopped or waitingForReadyPlate then
+            return
+        end
+        queued = true
+        C_Timer.After(0, function()
+            queued = false
+            if ready and not stopped and not active and not waitingForReadyPlate and Stop() then
+                transitioning = true
+                local restored = RestoreLegacySettings()
+                transitioning = false
+                if restored then
+                    Acquire()
+                end
+            end
+        end)
+    end
+
+    local function RefreshControlSettings()
+        yielded = false
+        waitingForReadyPlate = false
+        Stop()
+        QueueReconcile()
+    end
+
+    function addon.CreateSimpleNameplateMode(kind, legacy, isEnabled, refreshPlates, includesUnit)
+        local style = styles[kind]
+        local mode = { legacy = legacy, isEnabled = isEnabled, refreshPlates = refreshPlates }
+        local enabled = isEnabled()
+        modes[kind] = mode
+
+        function mode:ReleaseUnit(unit)
+            local display = displayedUnits[unit]
+            if display and display.kind == kind then
+                ReleaseDisplay(display)
+            end
+        end
+
+        function mode:ReleasePlate(plate)
+            local display = displays[plate]
+            if display and display.kind == kind then
+                ReleaseDisplay(display)
+            end
+        end
+
+        function mode:IncludesUnit(unit)
+            return enabled and (not includesUnit or includesUnit(unit))
+        end
+
+        function mode:UpdateName(plate, unit, nativeName, subtitle, x, y)
+            if not active or not self:IncludesUnit(unit) or IsTarget(unit) ~= false then
+                self:ReleasePlate(plate)
+                return nativeName
+            end
+            local widgetsOnly = plate.UnitFrame.widgetsOnlyMode
+            if IsForbidden(nativeName) or issecretvalue(widgetsOnly) or widgetsOnly then
+                Yield()
+                return nativeName
+            end
+            local text = GetPlateName(unit, nativeName)
+            if not text then
+                self:ReleasePlate(plate)
+                return nativeName
+            end
+
+            local current = displays[plate]
+            if (not current or not current.unit) and not IsNativePlateVisible(plate) then
+                return nativeName
+            end
+
+            local display = HideNative(plate, unit, kind)
+            if not display then
+                Yield()
+                return nativeName
+            end
+            if not display.name then
+                display.name = CreateOverheadText(plate)
+            end
+            display.name:ClearAllPoints()
+            display.name:SetPoint("CENTER", nativeName, "CENTER")
+
+            if not display.textScale then
+                local zoom = GetReadableCameraZoom() or cameraZoom
+                display.distance = GetUnitDistance(unit, CanCheckInteractionRange())
+                display.textScale = GetTextScale(zoom, display.distance)
+                if visibleSimpleCount == 1 then
+                    cameraZoom = zoom
+                    events:SetScript("OnUpdate", RefreshTextScale)
+                end
+            end
+            local font, _, flags = nativeName:GetFont()
+            if not IsReadable(font, "string") then
+                font, _, flags = display.name:GetFont()
+            end
+            font = IsReadable(font, "string") and font or nil
+            flags = WithoutOutline(flags)
+            if font then
+                display.name:SetFont(font, baseFontSize, flags)
+            end
+            display.name:SetScale(display.textScale)
+            local r, g, b = GetOverheadColour(unit, style)
+            display.name:SetText(text)
+            display.name:SetTextColor(r, g, b)
+            display.name:Show()
+
+            if style.isPlayer then
+                subtitle = GetGuildTitle(unit)
+            end
+            if subtitle then
+                if not display.subtitle then
+                    display.subtitle = CreateOverheadText(plate)
+                end
+                if font then
+                    display.subtitle:SetFont(font, baseFontSize, flags)
+                end
+                display.subtitleX, display.subtitleY = x or 0, y or 0
+                display.subtitle:SetScale(display.textScale)
+                display.subtitle:ClearAllPoints()
+                AnchorSubtitle(display)
+                display.subtitle:SetText(subtitle)
+                display.subtitle:SetTextColor(r, g, b)
+                display.subtitle:Show()
+            elseif display.subtitle then
+                display.subtitle:Hide()
+            end
+            return display.name
+        end
+
+        function mode:RefreshName(plate, nativeName)
+            local display = displays[plate]
+            if display and display.unit and display.kind == kind then
+                return self:UpdateName(plate, display.unit, nativeName)
+            end
+            return nativeName
+        end
+
+        function mode:UpdateSettings()
+            local enabledNow = isEnabled()
+            if enabled == enabledNow then
+                return
+            end
+            enabled = enabledNow
+            RefreshControlSettings()
+        end
+
+        return mode
+    end
+
+    local function HookSettingsPanel()
+        if not settingsPanel and SettingsPanel then
+            settingsPanel = SettingsPanel
+            -- Restore the actual CVars before the native settings panel is drawn.
+            settingsPanel:HookScript("OnShow", Stop)
+            settingsPanel:HookScript("OnHide", QueueReconcile)
+        end
+    end
+    HookSettingsPanel()
+
+    for _, event in ipairs({
+        "PLAYER_ENTERING_WORLD", "PLAYER_LEAVING_WORLD", "PLAYER_LOGOUT",
+        "PLAYER_REGEN_ENABLED", "PLAYER_REGEN_DISABLED", "PLAYER_TARGET_CHANGED",
+        "NAME_PLATE_UNIT_ADDED", "NAME_PLATE_UNIT_REMOVED", "UNIT_NAME_UPDATE", "FORBIDDEN_NAME_PLATE_UNIT_ADDED",
+        "CVAR_UPDATE", "ADDON_LOADED",
+    }) do
+        events:RegisterEvent(event)
+    end
+    events:SetScript("OnEvent", function(_, event, unit)
+        if transitioning then
+            return
+        end
+        if event == "PLAYER_LOGOUT" or event == "PLAYER_LEAVING_WORLD" then
             ready = false
-            Stop(true)
+            stopped = event == "PLAYER_LOGOUT"
+            Stop()
         elseif event == "PLAYER_ENTERING_WORLD" then
             ready = true
-            takeoverFailed = false
+            waitingForReadyPlate = false
             QueueReconcile()
-        elseif event == "PLAYER_REGEN_ENABLED" or (event == "NAME_PLATE_UNIT_REMOVED" and waitingForPlates) then
-            QueueReconcile()
-        elseif event == "CVAR_UPDATE" and not writing and IsReadable(name, "string") then
-            if managedKeys[name:lower()] then
-                if active then
-                    Reconcile()
-                else
+        elseif event == "CVAR_UPDATE" and IsReadable(unit, "string") and watchedKeys[unit:lower()] then
+            if active then
+                if unit:lower() == nameOnly:lower() or HasVisibilityChanged(expectedVisibility) then
+                    Yield()
+                end
+            else
+                QueueReconcile()
+            end
+        elseif event == "ADDON_LOADED" then
+            HookSettingsPanel()
+            if active and HasNameplateAddon() then
+                Yield()
+            end
+        elseif event == "FORBIDDEN_NAME_PLATE_UNIT_ADDED" and active then
+            Yield()
+        elseif event == "NAME_PLATE_UNIT_REMOVED" and IsReadable(unit, "string") then
+            pendingUnits[unit] = nil
+            ReleaseDisplay(displayedUnits[unit])
+            if not active then
+                QueueReconcile()
+            end
+        elseif (event == "NAME_PLATE_UNIT_ADDED" or event == "UNIT_NAME_UPDATE") and IsReadable(unit, "string") then
+            local plate = C_NamePlate.GetNamePlateForUnit(unit)
+            if active and (event == "NAME_PLATE_UNIT_ADDED" or plate) then
+                local result = FilterPlate(plate)
+                pendingUnits[unit] = not plate and true or nil
+                if result == false then
+                    Yield()
+                elseif result == nil then
+                    QueuePlateRetry(1)
+                end
+            elseif waitingForReadyPlate then
+                local frame = plate and not plate:IsForbidden() and plate.UnitFrame
+                if frame and not frame:IsForbidden() and frame.name and not IsForbidden(frame.name)
+                    and GetPlateName(unit, frame.name) then
+                    waitingForReadyPlate = false
                     QueueReconcile()
                 end
+            end
+        elseif event == "PLAYER_REGEN_DISABLED" and active and pauseInCombat then
+            Stop()
+        elseif event == "PLAYER_TARGET_CHANGED" or event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_REGEN_DISABLED" then
+            RefreshPlates()
+            if not active then
+                QueueReconcile()
             end
         end
     end)
 
-    return mode
+    return function(enabled)
+        if saved.enabled ~= enabled then
+            saved.enabled = enabled
+            RefreshControlSettings()
+        end
+    end
 end
