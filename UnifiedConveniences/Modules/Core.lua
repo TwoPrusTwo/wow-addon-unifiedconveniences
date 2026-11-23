@@ -28,8 +28,8 @@ local sliderWidth = 250
 local sliderRowStep = settingsRowStep + 13 -- Extra room for the value labels below the thumb.
 local sliderInputGap = 12
 local categorySymbolGap = 12
-local categorySymbolSize = 24
-local categoryLabelRight = settingsLabelRight - categorySymbolGap - categorySymbolSize
+local maxPreviewSize = 50
+local categoryLabelRight = settingsLabelRight - categorySymbolGap - maxPreviewSize
 local numberInputWidth = 96
 local numberInputHeight = 22
 local indicatorCategories = addon.friendlyIndicatorCategories
@@ -41,11 +41,11 @@ local defaults = {
 }
 local indicatorDefaults = {
     enabled = false,
-    size = 24,
     horizontalOffset = 0,
     verticalOffset = 0,
 }
-local indicatorSize = {
+local indicatorSizePixels = {
+    default = 24,
     minimum = 1,
     maximum = 50,
     step = 1,
@@ -54,6 +54,15 @@ local indicatorSize = {
 
 local function IsFinite(value)
     return type(value) == "number" and value > -math.huge and value < math.huge
+end
+
+-- Saved lengths use UIParent coordinates. Controls display physical pixels.
+local function GetUIUnitsPerPixel()
+    return PixelUtil.GetPixelToUIUnitFactor() / UIParent:GetEffectiveScale()
+end
+
+function addon.GetUIToRegionScale(region)
+    return UIParent:GetEffectiveScale() / region:GetEffectiveScale()
 end
 
 if not IsFinite(UCOffsetSliderMax) or UCOffsetSliderMax <= 0 then
@@ -75,7 +84,15 @@ end
 
 local function ApplyIndicatorDefaults(settings, reset)
     ApplyDefaults(settings, indicatorDefaults, reset)
-    settings.size = math.max(indicatorSize.minimum, math.floor(settings.size))
+    if reset or not IsFinite(settings.size) then
+        settings.size = indicatorSizePixels.default * GetUIUnitsPerPixel()
+    elseif settings.sizeInUIUnits ~= true then
+        -- Existing saved sizes are whole pixels.
+        settings.size = math.max(indicatorSizePixels.minimum, math.floor(settings.size)) * GetUIUnitsPerPixel()
+    elseif settings.size <= 0 then
+        settings.size = indicatorSizePixels.minimum * GetUIUnitsPerPixel()
+    end
+    settings.sizeInUIUnits = true
     for _, category in ipairs(indicatorCategories) do
         local style = settings[category.key]
         if type(style) ~= "table" then
@@ -102,12 +119,9 @@ local function AddText(panel, text, font, x, y)
     return label
 end
 
-local function FormatOffset(value)
-    local text = tostring(value)
-    if tonumber(text) == value then
-        return text
-    end
-    return string.format("%.17g", value)
+local function FormatPixels(value)
+    local rounded = string.format("%.0f", value)
+    return rounded == "-0" and "0" or rounded
 end
 
 local function CreateSectionHeading(panel, name, y)
@@ -153,7 +167,7 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
     if not sizeConfig then
         local zeroLabel = control:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         zeroLabel:SetPoint("TOP", slider.Middle, "BOTTOM", 0, -sliderLabelMargin)
-        zeroLabel:SetText("0")
+        zeroLabel:SetText("0 px")
     end
 
     local input = CreateNumberInput(row)
@@ -161,7 +175,12 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
 
     local syncingSlider = false
     local step = sizeConfig and sizeConfig.step or sliderStep
-    local sliderMin, sliderMax
+    local sliderMin, sliderMax, displayScale
+    local displayedText
+
+    local function GetSliderValue(value)
+        return sizeConfig and value / GetUIUnitsPerPixel() or value
+    end
 
     local function GetThumbValue(value)
         if value <= sliderMin or value >= sliderMax then
@@ -174,10 +193,12 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
 
     local function SyncValue()
         local value = settings[key]
+        local pixels = value / GetUIUnitsPerPixel()
         syncingSlider = true
-        control:SetValue(GetThumbValue(value))
+        control:SetValue(GetThumbValue(GetSliderValue(value)))
         syncingSlider = false
-        input:SetText(sizeConfig and string.format("%.0f", value) or FormatOffset(value))
+        displayedText = FormatPixels(pixels)
+        input:SetText(displayedText)
     end
 
     local function SaveValue(value)
@@ -186,6 +207,10 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
             onChange()
         end
         SyncValue()
+    end
+
+    local function SaveSliderValue(value)
+        SaveValue(sizeConfig and value * GetUIUnitsPerPixel() or value)
     end
 
     local function RefreshRow()
@@ -199,16 +224,20 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
             end
             minimum = -maximum
         end
-        if minimum ~= sliderMin or maximum ~= sliderMax then
-            sliderMin, sliderMax = minimum, maximum
+        local unitsPerPixel = GetUIUnitsPerPixel()
+        if minimum ~= sliderMin or maximum ~= sliderMax or unitsPerPixel ~= displayScale then
+            sliderMin, sliderMax, displayScale = minimum, maximum, unitsPerPixel
             local labels = MinimalSliderWithSteppersMixin.Label
-            local suffix = sizeConfig and " px" or ""
+            local function FormatLimit(value)
+                local pixels = sizeConfig and value or value / unitsPerPixel
+                return FormatPixels(pixels) .. " px"
+            end
             local formatters = {
-                [labels.Min] = function() return FormatOffset(minimum) .. suffix end,
-                [labels.Max] = function() return FormatOffset(maximum) .. suffix end,
+                [labels.Min] = function() return FormatLimit(minimum) end,
+                [labels.Max] = function() return FormatLimit(maximum) end,
             }
             syncingSlider = true
-            control:Init(GetThumbValue(settings[key]), minimum, maximum, (maximum - minimum) / step, formatters)
+            control:Init(GetThumbValue(GetSliderValue(settings[key])), minimum, maximum, (maximum - minimum) / step, formatters)
             syncingSlider = false
         end
         SyncValue()
@@ -216,13 +245,13 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
 
     control:RegisterCallback("OnValueChanged", function(_, value)
         if not syncingSlider then
-            SaveValue(value)
+            SaveSliderValue(value)
         end
     end, control)
     if sizeConfig then
         local function StepSize(delta)
             local value = math.max(sliderMin, math.min(sliderMax, slider:GetValue() + delta))
-            SaveValue(value)
+            SaveSliderValue(value)
             PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
         end
         control.Back:SetScript("OnClick", function() StepSize(-sizeConfig.arrowStep) end)
@@ -231,18 +260,18 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
 
     input:SetScript("OnEditFocusLost", function(self)
         local text = self:GetText()
-        local value
-        if sizeConfig then
-            if text:match("^%s*[+-]?%d+%s*$") then
-                local number = tonumber(text)
-                if IsFinite(number) then
-                    value = math.max(sizeConfig.minimum, number)
-                end
-            end
-        elseif not text:match("^%s*[+-]?0[xX]") then
-            value = tonumber(text)
+        if text == displayedText then
+            return
         end
-        SaveValue(value)
+        local pixels = tonumber(text:match("^%s*([+-]?%d+)%s*$"))
+        if IsFinite(pixels) then
+            if sizeConfig then
+                pixels = math.max(sizeConfig.minimum, pixels)
+            end
+            SaveValue(pixels * GetUIUnitsPerPixel())
+        else
+            SyncValue()
+        end
     end)
     input:SetScript("OnEscapePressed", function(self)
         SyncValue()
@@ -311,6 +340,13 @@ end
 
 local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndicators)
     local dropdowns, checkboxes, symbols = {}, {}, {}
+
+    local function RefreshSymbolSizes()
+        local size = math.min(maxPreviewSize, settings.size * addon.GetUIToRegionScale(body))
+        for _, symbol in pairs(symbols) do
+            symbol:SetSize(size, size)
+        end
+    end
 
     local function RefreshSymbol(key)
         local previewColour = preview.key == key and preview.colour
@@ -382,8 +418,7 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
         checkboxes[key] = checkbox
 
         local symbol = row:CreateTexture(nil, "OVERLAY")
-        symbol:SetPoint("RIGHT", checkbox, "LEFT", -categorySymbolGap, 0)
-        symbol:SetSize(categorySymbolSize, categorySymbolSize)
+        symbol:SetPoint("CENTER", checkbox, "LEFT", -categorySymbolGap - maxPreviewSize / 2, 0)
         addon.SetFriendlyIndicatorTexture(symbol, category)
         symbols[key] = symbol
 
@@ -407,6 +442,7 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
     end
 
     local function RefreshRows()
+        RefreshSymbolSizes()
         for _, category in ipairs(indicatorCategories) do
             local key = category.key
             checkboxes[key]:SetChecked(settings[key].enabled)
@@ -417,7 +453,13 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
 
     local chatColourRefreshPending = false
     body:RegisterEvent("UPDATE_CHAT_COLOR")
-    body:SetScript("OnEvent", function(_, _, chatType)
+    body:RegisterEvent("UI_SCALE_CHANGED")
+    body:RegisterEvent("DISPLAY_SIZE_CHANGED")
+    body:SetScript("OnEvent", function(_, event, chatType)
+        if event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
+            RefreshSymbolSizes()
+            return
+        end
         if chatColourRefreshPending or not addon.IsFriendlyIndicatorChatColour(chatType) then
             return
         end
@@ -432,7 +474,7 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
         end)
     end)
 
-    return RefreshRows, CancelPreview
+    return RefreshRows, CancelPreview, RefreshSymbolSizes
 end
 
 local function CreateTrackingRows(body, selectionY, tracking)
@@ -505,13 +547,18 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         refreshIndicators()
     end)
     y = y - settingsRowStep
-    local refreshSize = CreateNumericRow(body, "Size", y, indicators, "size", refreshIndicators, indicatorSize)
+    local refreshSymbolSizes
+    local refreshSize = CreateNumericRow(body, "Size (px)", y, indicators, "size", function()
+        refreshSymbolSizes()
+        refreshIndicators()
+    end, indicatorSizePixels)
     y = y - sliderRowStep
-    local refreshIndicatorHorizontal = CreateNumericRow(body, "Horizontal Offset", y, indicators, "horizontalOffset", refreshIndicators)
+    local refreshIndicatorHorizontal = CreateNumericRow(body, "Horizontal Offset (px)", y, indicators, "horizontalOffset", refreshIndicators)
     y = y - sliderRowStep
-    local refreshIndicatorVertical = CreateNumericRow(body, "Vertical Offset", y, indicators, "verticalOffset", refreshIndicators)
+    local refreshIndicatorVertical = CreateNumericRow(body, "Vertical Offset (px)", y, indicators, "verticalOffset", refreshIndicators)
     y = y - sliderRowStep
-    local refreshIndicatorRows, cancelColourPreview = CreateIndicatorColourRows(body, y, indicators, preview, refreshIndicators)
+    local refreshIndicatorRows, cancelColourPreview
+    refreshIndicatorRows, cancelColourPreview, refreshSymbolSizes = CreateIndicatorColourRows(body, y, indicators, preview, refreshIndicators)
 
     y = CreateSectionHeading(body, "Tracking Manager", y - #indicatorCategories * settingsRowStep)
     local nextSectionY, refreshTracking = CreateTrackingRows(body, y, tracking)
@@ -524,9 +571,9 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         refreshNameplates()
     end)
     y = y - settingsRowStep
-    local refreshZeppelinHorizontal = CreateNumericRow(body, "Horizontal Offset", y, db, "zeppelinHorizontalOffset", refreshNameplates)
+    local refreshZeppelinHorizontal = CreateNumericRow(body, "Horizontal Offset (px)", y, db, "zeppelinHorizontalOffset", refreshNameplates)
     y = y - sliderRowStep
-    local refreshZeppelinVertical = CreateNumericRow(body, "Vertical Offset", y, db, "zeppelinVerticalOffset", refreshNameplates)
+    local refreshZeppelinVertical = CreateNumericRow(body, "Vertical Offset (px)", y, db, "zeppelinVerticalOffset", refreshNameplates)
 
     y = CreateSectionHeading(body, "About", y - sliderRowStep)
     CreateSettingRow(body, "Version: " .. C_AddOns.GetAddOnMetadata(addonName, "Version"), y)
@@ -534,16 +581,20 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     CreateSettingRow(body, "Author: " .. C_AddOns.GetAddOnMetadata(addonName, "Author"), y)
     body:SetHeight(-y + settingsRowHeight + settingsListPadding)
 
-    local function RefreshOptions()
-        indicatorsCheckbox:SetChecked(indicators.enabled)
+    local function RefreshMeasurementControls()
         refreshSize()
         refreshIndicatorHorizontal()
         refreshIndicatorVertical()
+        refreshZeppelinHorizontal()
+        refreshZeppelinVertical()
+    end
+
+    local function RefreshOptions()
+        RefreshMeasurementControls()
+        indicatorsCheckbox:SetChecked(indicators.enabled)
         refreshIndicatorRows()
         refreshTracking()
         zeppelinCheckbox:SetChecked(db.showZeppelinDestination)
-        refreshZeppelinHorizontal()
-        refreshZeppelinVertical()
     end
     defaultsButton:SetScript("OnClick", function()
         cancelColourPreview()
@@ -556,6 +607,9 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     end)
     panel:SetScript("OnShow", RefreshOptions)
     panel:SetScript("OnHide", cancelColourPreview)
+    panel:RegisterEvent("UI_SCALE_CHANGED")
+    panel:RegisterEvent("DISPLAY_SIZE_CHANGED")
+    panel:SetScript("OnEvent", RefreshMeasurementControls)
     RefreshOptions()
 
     local category = Settings.RegisterCanvasLayoutCategory(panel, title)

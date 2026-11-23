@@ -2,7 +2,7 @@
 ## Title: Unified Conveniences
 ## IconTexture: 3610516
 ## Notes: Shows zeppelin destinations on tooltips and friendly nameplates.
-## Version: 0.2.2
+## Version: 0.2.6
 ## Author: TwoPrusTwo
 ## SavedVariables: UCDB
 

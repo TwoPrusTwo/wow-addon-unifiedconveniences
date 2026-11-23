@@ -95,12 +95,13 @@ function addon.InitializeZeppelinDestinations(db, defaultVerticalOffset)
             return
         end
 
-        local x, y = db.zeppelinHorizontalOffset, db.zeppelinVerticalOffset
+        local scale = addon.GetUIToRegionScale(plate)
+        local x, y = db.zeppelinHorizontalOffset * scale, db.zeppelinVerticalOffset * scale
         local unitFrame = plate.UnitFrame
         if unitFrame and not unitFrame:IsForbidden() and unitFrame.name then
             local name = unitFrame.name
             -- The default offset places the title just below the name on a simple plate.
-            if nameplateMode:UpdateName(plate, unit, name, title, x, y - defaultVerticalOffset) ~= name then
+            if nameplateMode:UpdateName(plate, unit, name, title, x, y - defaultVerticalOffset * scale) ~= name then
                 return
             end
         else
@@ -138,7 +139,15 @@ function addon.InitializeZeppelinDestinations(db, defaultVerticalOffset)
     events:RegisterEvent("NAME_PLATE_UNIT_ADDED")
     events:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
     events:RegisterEvent("UNIT_NAME_UPDATE")
+    events:RegisterEvent("UI_SCALE_CHANGED")
+    events:RegisterEvent("DISPLAY_SIZE_CHANGED")
     events:SetScript("OnEvent", function(_, event, unit)
+        if event == "UI_SCALE_CHANGED" or event == "DISPLAY_SIZE_CHANGED" then
+            if db.showZeppelinDestination then
+                RefreshNameplates()
+            end
+            return
+        end
         if issecretvalue(unit) or type(unit) ~= "string" then
             return
         end

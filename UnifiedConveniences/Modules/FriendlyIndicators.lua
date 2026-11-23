@@ -221,10 +221,16 @@ function addon.InitializeFriendlyIndicators(settings, preview)
         record.marker:SetShown(record.anchor:IsShown())
     end
 
-    local function AnchorMarker(record, anchor)
+    local function LayoutMarker(record, anchor)
         record.anchor = anchor
-        record.marker:ClearAllPoints()
-        record.marker:SetPoint("BOTTOM", anchor, "TOP", settings.horizontalOffset, settings.verticalOffset)
+        local marker = record.marker
+        local scale = addon.GetUIToRegionScale(marker)
+        marker:ClearAllPoints()
+        marker:SetPoint("BOTTOM", anchor, "TOP", settings.horizontalOffset * scale, settings.verticalOffset * scale)
+        local size = settings.size * scale
+        if size > 0 and size < math.huge then
+            marker:SetSize(size, size)
+        end
     end
 
     local function UpdatePlate(plate, unit)
@@ -277,12 +283,7 @@ function addon.InitializeFriendlyIndicators(settings, preview)
         record.defaultColourKey = category.key == "party" and partyMembers[guid] or category.key
         activeByUnit[unit] = record
 
-        local marker = record.marker
-        AnchorMarker(record, anchor)
-        local size = settings.size / plate:GetEffectiveScale() * PixelUtil.GetPixelToUIUnitFactor()
-        if size > 0 and size < math.huge then
-            marker:SetSize(size, size)
-        end
+        LayoutMarker(record, anchor)
         UpdateAppearance(record, name)
     end
 
@@ -366,7 +367,7 @@ function addon.InitializeFriendlyIndicators(settings, preview)
                 local record = markersByPlate[plate]
                 if record and record.unit then
                     if record.anchor ~= anchor then
-                        AnchorMarker(record, anchor)
+                        LayoutMarker(record, anchor)
                     end
                     UpdateAppearance(record, name)
                 end
