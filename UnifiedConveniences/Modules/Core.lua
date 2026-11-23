@@ -4,23 +4,34 @@ local title = "Unified Conveniences"
 local sliderStep = 5
 local sliderLabelMargin = 5
 local defaultSliderMax = 50
+-- Match the native Settings list insets, row metrics and control anchors.
 local settingsRowHeight = 26
-local settingsRowLeft = 10
-local settingsRowRight = 20
+local settingsRowSpacing = 9
+local settingsRowStep = settingsRowHeight + settingsRowSpacing
+local settingsListPadding = 10
+local settingsRowLeft = 25
+local settingsSectionHeight = 45
+local settingsSectionInset = 7
+local settingsSectionTitleY = -16
 local settingsLabelInset = 37
 local settingsControlOffset = -80
-local settingsBodyTop = 62
+local settingsLabelRight = settingsControlOffset - 5
+local settingsBodyLeft = -15
+local settingsBodyTop = 52
+local settingsBodyBottom = -2
 local settingsScrollBarSpace = 20
-local headingToCheckbox = 24
-local checkboxToSlider = 35
-local sliderRowSpacing = 48
-local sliderToCategory = 44
-local sliderToHeading = 63
-local categoryRowSpacing = 30
-local categoryToHeading = 36
-local categoryControlGap = 12
+local settingsDropdownOffset = -48
+local settingsDropdownWidth = 220
+local settingsControlLift = 3
+local checkboxDropdownGap = 32
+local sliderWidth = 250
+local sliderRowStep = settingsRowStep + 13 -- Extra room for the value labels below the thumb.
+local sliderInputGap = 12
+local categorySymbolGap = 12
 local categorySymbolSize = 24
-local categoryDropdownWidth = 150
+local categoryLabelRight = settingsLabelRight - categorySymbolGap - categorySymbolSize
+local numberInputWidth = 96
+local numberInputHeight = 22
 local indicatorCategories = addon.friendlyIndicatorCategories
 local colourModes = { "Default", "Class", "Custom" }
 local defaults = {
@@ -99,27 +110,40 @@ local function FormatOffset(value)
     return string.format("%.17g", value)
 end
 
-local function CreateSettingRow(panel, name, y)
-    -- Mirror the native scroll list's row bounds and its label column.
+local function CreateSectionHeading(panel, name, y)
+    AddText(panel, name, "GameFontHighlightLarge", settingsRowLeft + settingsSectionInset, y + settingsSectionTitleY)
+    return y - settingsSectionHeight - settingsRowSpacing
+end
+
+local function CreateSettingRow(panel, name, y, labelRight)
     local row = CreateFrame("Frame", nil, panel)
     row:SetHeight(settingsRowHeight)
     row:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsRowLeft, y)
-    row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -settingsRowRight, y)
+    row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, y)
 
     local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     label:SetPoint("LEFT", row, "LEFT", settingsLabelInset, 0)
-    label:SetPoint("RIGHT", row, "CENTER", settingsControlOffset - 5, 0)
+    label:SetPoint("RIGHT", row, "CENTER", labelRight or settingsLabelRight, 0)
     label:SetJustifyH("LEFT")
     label:SetWordWrap(false)
     label:SetText(name)
     return row
 end
 
+local function CreateNumberInput(row)
+    local input = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
+    input:SetSize(numberInputWidth, numberInputHeight)
+    input:SetAutoFocus(false)
+    input:SetJustifyH("CENTER")
+    input:SetScript("OnEnterPressed", input.ClearFocus)
+    return input
+end
+
 local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeConfig)
     local row = CreateSettingRow(panel, label, y)
     local control = CreateFrame("Frame", nil, row, "MinimalSliderWithSteppersTemplate")
-    control:SetPoint("LEFT", row, "CENTER", settingsControlOffset, 3)
-    control:SetWidth(250)
+    control:SetPoint("LEFT", row, "CENTER", settingsControlOffset, settingsControlLift)
+    control:SetWidth(sliderWidth)
     local slider = control.Slider
 
     control.MinText:ClearAllPoints()
@@ -132,11 +156,8 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
         zeroLabel:SetText("0")
     end
 
-    local input = CreateFrame("EditBox", nil, row, "InputBoxTemplate")
-    input:SetPoint("LEFT", control, "RIGHT", 12, 0)
-    input:SetSize(96, 22)
-    input:SetAutoFocus(false)
-    input:SetJustifyH("CENTER")
+    local input = CreateNumberInput(row)
+    input:SetPoint("LEFT", control, "RIGHT", sliderInputGap, 0)
 
     local syncingSlider = false
     local step = sizeConfig and sizeConfig.step or sliderStep
@@ -223,9 +244,6 @@ local function CreateNumericRow(panel, label, y, settings, key, onChange, sizeCo
         end
         SaveValue(value)
     end)
-    input:SetScript("OnEnterPressed", function(self)
-        self:ClearFocus()
-    end)
     input:SetScript("OnEscapePressed", function(self)
         SyncValue()
         self:ClearFocus()
@@ -248,15 +266,37 @@ local function CreateCheckbox(row, name, description, onChange)
     return checkbox
 end
 
+local function CreateSettingsDropdown(row, populateMenu, checkbox, defaultText)
+    local control = CreateFrame("Frame", nil, row, "SettingsDropdownWithButtonsTemplate")
+    if checkbox then
+        control:SetPoint("LEFT", checkbox, "RIGHT", checkboxDropdownGap, 0)
+    else
+        control:SetPoint("LEFT", row, "CENTER", settingsDropdownOffset, settingsControlLift)
+    end
+    local dropdown = control.Dropdown
+    dropdown:SetWidth(settingsDropdownWidth)
+    if defaultText then
+        dropdown:SetDefaultText(defaultText)
+    end
+    dropdown:SetupMenu(populateMenu)
+    control:SetSteppersShown(true)
+    return control
+end
+
+local function RefreshDropdown(control)
+    control.Dropdown:GenerateMenu()
+    control:UpdateSteppers()
+end
+
 local function CreateSettingsBody(panel)
     local scroll = CreateFrame("ScrollFrame", nil, panel)
-    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -settingsBodyTop)
-    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, 10)
+    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsBodyLeft, -settingsBodyTop)
+    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, settingsBodyBottom)
     scroll:EnableMouseWheel(true)
 
     local scrollBar = CreateFrame("EventFrame", nil, panel, "MinimalScrollBar")
     scrollBar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 0, -4)
-    scrollBar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 0, 7)
+    scrollBar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", -1, 7)
     scrollBar:SetHideIfUnscrollable(true)
     ScrollUtil.InitScrollFrameWithScrollBar(scroll, scrollBar)
 
@@ -290,7 +330,7 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
         end
         preview.key, preview.colour = nil, nil
         RefreshSymbol(key)
-        dropdowns[key]:GenerateMenu()
+        RefreshDropdown(dropdowns[key])
         refreshIndicators()
     end
 
@@ -334,7 +374,7 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
     for index, category in ipairs(indicatorCategories) do
         local key = category.key
         local style = settings[key]
-        local row = CreateSettingRow(body, category.label, y - (index - 1) * categoryRowSpacing)
+        local row = CreateSettingRow(body, category.label, y - (index - 1) * settingsRowStep, categoryLabelRight)
         local checkbox = CreateCheckbox(row, category.label, nil, function(value)
             style.enabled = value
             refreshIndicators()
@@ -342,16 +382,12 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
         checkboxes[key] = checkbox
 
         local symbol = row:CreateTexture(nil, "OVERLAY")
-        symbol:SetPoint("RIGHT", checkbox, "LEFT", -categoryControlGap, 0)
+        symbol:SetPoint("RIGHT", checkbox, "LEFT", -categorySymbolGap, 0)
         symbol:SetSize(categorySymbolSize, categorySymbolSize)
         addon.SetFriendlyIndicatorTexture(symbol, category)
         symbols[key] = symbol
 
-        local dropdown = CreateFrame("DropdownButton", nil, row, "WowStyle2DropdownTemplate")
-        dropdown:SetPoint("LEFT", checkbox, "RIGHT", categoryControlGap, 0)
-        dropdown:SetWidth(categoryDropdownWidth)
-        dropdowns[key] = dropdown
-        dropdown:SetupMenu(function(_, menu)
+        dropdowns[key] = CreateSettingsDropdown(row, function(_, menu)
             for _, mode in ipairs(colourModes) do
                 menu:CreateRadio(mode, function(value)
                     local current = preview.key == key and "Custom" or style.colourMode
@@ -367,14 +403,14 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
                     end
                 end, mode)
             end
-        end)
+        end, checkbox)
     end
 
     local function RefreshRows()
         for _, category in ipairs(indicatorCategories) do
             local key = category.key
             checkboxes[key]:SetChecked(settings[key].enabled)
-            dropdowns[key]:GenerateMenu()
+            RefreshDropdown(dropdowns[key])
             RefreshSymbol(key)
         end
     end
@@ -399,7 +435,54 @@ local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndi
     return RefreshRows, CancelPreview
 end
 
-local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview)
+local function CreateTrackingRows(body, selectionY, tracking)
+    local selectionRow = CreateSettingRow(body, "Tracking", selectionY)
+    local dropdown = CreateSettingsDropdown(selectionRow, tracking.PopulateMenu, nil, "Unavailable")
+
+    local treasureCheckbox
+    local intervalY = selectionY - settingsRowStep
+    if tracking.isDwarf then
+        local treasureRow = CreateSettingRow(body, "Find Treasure", intervalY)
+        treasureCheckbox = CreateCheckbox(treasureRow, "Find Treasure", "Keep Find Treasure active independently of the selected tracker.", tracking.SetTreasure)
+        intervalY = intervalY - settingsRowStep
+    end
+
+    local intervalRow = CreateSettingRow(body, "Interval (s)", intervalY)
+    local input = CreateNumberInput(intervalRow)
+    input:SetPoint("LEFT", intervalRow, "CENTER", settingsControlOffset, 0)
+    local function RefreshInterval()
+        input:SetText(string.format("%.0f", tracking.settings.interval))
+    end
+    input:SetScript("OnEditFocusLost", function(self)
+        local value = self:GetText():match("^%s*%+?(%d+)%s*$")
+        if value then
+            tracking.SetInterval(tonumber(value))
+        end
+        RefreshInterval()
+    end)
+    input:SetScript("OnEscapePressed", function(self)
+        RefreshInterval()
+        self:ClearFocus()
+    end)
+
+    local function RefreshSelection()
+        RefreshDropdown(dropdown)
+        if treasureCheckbox then
+            treasureCheckbox:SetChecked(tracking.settings.findTreasure)
+        end
+    end
+    tracking.RefreshOptions = function()
+        if selectionRow:IsVisible() then
+            RefreshSelection()
+        end
+    end
+    return intervalY - settingsRowStep, function()
+        RefreshSelection()
+        RefreshInterval()
+    end
+end
+
+local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking)
     local panel = CreateFrame("Frame")
     panel:Hide()
     AddText(panel, title, "GameFontHighlightHuge", 7, -22)
@@ -415,43 +498,41 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     local body = CreateSettingsBody(panel)
     local indicators = db.friendlyIndicators
     local indicatorsTitle = "Friendly Indicators"
-    local indicatorsHeadingY = -16
-    AddText(body, indicatorsTitle, "GameFontHighlightLarge", 17, indicatorsHeadingY)
-    local indicatorsCheckboxY = indicatorsHeadingY - headingToCheckbox
-    local indicatorsRow = CreateSettingRow(body, indicatorsTitle, indicatorsCheckboxY)
+    local y = CreateSectionHeading(body, indicatorsTitle, -settingsListPadding)
+    local indicatorsRow = CreateSettingRow(body, indicatorsTitle, y)
     local indicatorsCheckbox = CreateCheckbox(indicatorsRow, indicatorsTitle, "Show symbols above friendly player names. In the open world, this can temporarily enable name-only plates when friendly player nameplates are off.", function(value)
         indicators.enabled = value
         refreshIndicators()
     end)
-    local sizeY = indicatorsCheckboxY - checkboxToSlider
-    local indicatorHorizontalY = sizeY - sliderRowSpacing
-    local indicatorVerticalY = indicatorHorizontalY - sliderRowSpacing
-    local refreshSize = CreateNumericRow(body, "Size", sizeY, indicators, "size", refreshIndicators, indicatorSize)
-    local refreshIndicatorHorizontal = CreateNumericRow(body, "Horizontal Offset", indicatorHorizontalY, indicators, "horizontalOffset", refreshIndicators)
-    local refreshIndicatorVertical = CreateNumericRow(body, "Vertical Offset", indicatorVerticalY, indicators, "verticalOffset", refreshIndicators)
-    local categoriesY = indicatorVerticalY - sliderToCategory
-    local refreshIndicatorRows, cancelColourPreview = CreateIndicatorColourRows(body, categoriesY, indicators, preview, refreshIndicators)
+    y = y - settingsRowStep
+    local refreshSize = CreateNumericRow(body, "Size", y, indicators, "size", refreshIndicators, indicatorSize)
+    y = y - sliderRowStep
+    local refreshIndicatorHorizontal = CreateNumericRow(body, "Horizontal Offset", y, indicators, "horizontalOffset", refreshIndicators)
+    y = y - sliderRowStep
+    local refreshIndicatorVertical = CreateNumericRow(body, "Vertical Offset", y, indicators, "verticalOffset", refreshIndicators)
+    y = y - sliderRowStep
+    local refreshIndicatorRows, cancelColourPreview = CreateIndicatorColourRows(body, y, indicators, preview, refreshIndicators)
+
+    y = CreateSectionHeading(body, "Tracking Manager", y - #indicatorCategories * settingsRowStep)
+    local nextSectionY, refreshTracking = CreateTrackingRows(body, y, tracking)
 
     local zeppelinTitle = "Zeppelin Destinations"
-    local lastCategoryY = categoriesY - (#indicatorCategories - 1) * categoryRowSpacing
-    local zeppelinHeadingY = lastCategoryY - categoryToHeading
-    AddText(body, zeppelinTitle, "GameFontHighlightLarge", 17, zeppelinHeadingY)
-    local zeppelinCheckboxY = zeppelinHeadingY - headingToCheckbox
-    local zeppelinRow = CreateSettingRow(body, zeppelinTitle, zeppelinCheckboxY)
+    y = CreateSectionHeading(body, zeppelinTitle, nextSectionY)
+    local zeppelinRow = CreateSettingRow(body, zeppelinTitle, y)
     local zeppelinCheckbox = CreateCheckbox(zeppelinRow, zeppelinTitle, "Show Zeppelin Master destinations on nameplates and in mouseover tooltips. In the open world, this can temporarily enable friendly NPC nameplates.", function(value)
         db.showZeppelinDestination = value
         refreshNameplates()
     end)
-    local zeppelinHorizontalY = zeppelinCheckboxY - checkboxToSlider
-    local zeppelinVerticalY = zeppelinHorizontalY - sliderRowSpacing
-    local refreshZeppelinHorizontal = CreateNumericRow(body, "Horizontal Offset", zeppelinHorizontalY, db, "zeppelinHorizontalOffset", refreshNameplates)
-    local refreshZeppelinVertical = CreateNumericRow(body, "Vertical Offset", zeppelinVerticalY, db, "zeppelinVerticalOffset", refreshNameplates)
+    y = y - settingsRowStep
+    local refreshZeppelinHorizontal = CreateNumericRow(body, "Horizontal Offset", y, db, "zeppelinHorizontalOffset", refreshNameplates)
+    y = y - sliderRowStep
+    local refreshZeppelinVertical = CreateNumericRow(body, "Vertical Offset", y, db, "zeppelinVerticalOffset", refreshNameplates)
 
-    local aboutY = zeppelinVerticalY - sliderToHeading
-    AddText(body, "About", "GameFontHighlightLarge", 17, aboutY)
-    AddText(body, "Version: " .. C_AddOns.GetAddOnMetadata(addonName, "Version"), "GameFontNormal", settingsRowLeft + settingsLabelInset, aboutY - 30)
-    AddText(body, "Author: " .. C_AddOns.GetAddOnMetadata(addonName, "Author"), "GameFontNormal", settingsRowLeft + settingsLabelInset, aboutY - 52)
-    body:SetHeight(-aboutY + 80)
+    y = CreateSectionHeading(body, "About", y - sliderRowStep)
+    CreateSettingRow(body, "Version: " .. C_AddOns.GetAddOnMetadata(addonName, "Version"), y)
+    y = y - settingsRowStep
+    CreateSettingRow(body, "Author: " .. C_AddOns.GetAddOnMetadata(addonName, "Author"), y)
+    body:SetHeight(-y + settingsRowHeight + settingsListPadding)
 
     local function RefreshOptions()
         indicatorsCheckbox:SetChecked(indicators.enabled)
@@ -459,6 +540,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         refreshIndicatorHorizontal()
         refreshIndicatorVertical()
         refreshIndicatorRows()
+        refreshTracking()
         zeppelinCheckbox:SetChecked(db.showZeppelinDestination)
         refreshZeppelinHorizontal()
         refreshZeppelinVertical()
@@ -467,6 +549,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         cancelColourPreview()
         ApplyDefaults(db, defaults, true)
         ApplyIndicatorDefaults(indicators, true)
+        tracking.Reset()
         RefreshOptions()
         refreshNameplates()
         refreshIndicators()
@@ -477,6 +560,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
 
     local category = Settings.RegisterCanvasLayoutCategory(panel, title)
     Settings.RegisterAddOnCategory(category)
+    return category
 end
 
 local loader = CreateFrame("Frame")
@@ -501,7 +585,11 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
     local preview = {}
     local refreshNameplates = addon.InitializeZeppelinDestinations(db, defaults.zeppelinVerticalOffset)
     local refreshIndicators = addon.InitializeFriendlyIndicators(db.friendlyIndicators, preview)
-    RegisterOptions(db, refreshNameplates, refreshIndicators, preview)
+    local tracking = addon.InitializeTrackingManager(db)
+    local category = RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking)
+    addon.CreateTrackingMinimapButton(tracking.PopulateMenu, function()
+        Settings.OpenToCategory(category:GetID())
+    end)
 
     local version = C_AddOns.GetAddOnMetadata(addonName, "Version")
     ChatFrameUtil.DisplaySystemMessage(ChatFrame1, title .. ": v" .. version)

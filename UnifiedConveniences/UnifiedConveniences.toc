@@ -2,11 +2,12 @@
 ## Title: Unified Conveniences
 ## IconTexture: 3610516
 ## Notes: Shows zeppelin destinations on tooltips and friendly nameplates.
-## Version: 0.1.7
+## Version: 0.2.2
 ## Author: TwoPrusTwo
 ## SavedVariables: UCDB
 
 Modules\SimpleNameplates.lua
 Modules\ZeppelinDestinations.lua
 Modules\FriendlyIndicators.lua
+Modules\TrackingManager.lua
 Modules\Core.lua
