@@ -93,6 +93,14 @@ local watchedKeys = { [nameOnly:lower()] = true }
 for _, name in ipairs(visibilityKeys) do
     watchedKeys[name:lower()] = true
 end
+local npcNameSettings = {
+    unitnamenpc = true,
+    unitnamefriendlyspecialnpcname = true,
+    unitnamehostlenpc = true,
+    unitnameinteractivenpc = true,
+    unitnamenoncombatcreaturename = true,
+    unitnamefriendlyminionname = true,
+}
 
 -- A loaded nameplate replacement can control visibility without writing a CVar.
 local nameplateAddons = {
@@ -102,8 +110,8 @@ local nameplateAddons = {
 }
 
 local baseFontSize = 14
-local maximumFontSize = 36
-local closeCameraDepth = 5
+local minimumFontSize, maximumFontSize = 2.5, 52
+local halfSizeDepth = 9.5
 local fallbackCameraZoom = 15
 local scaleResponseTime = .06
 local settledScaleDelta = .001
@@ -148,8 +156,9 @@ end
 
 local function GetTextScale(zoom, distance)
     -- Camera zoom and unit range are both measured from the player.
-    local depth = closeCameraDepth + zoom + (distance or middleUnitDistance)
-    return maximumFontSize * closeCameraDepth / (baseFontSize * depth)
+    local depth = zoom + (distance or middleUnitDistance)
+    local fontSize = maximumFontSize * .5 ^ (depth / halfSizeDepth)
+    return math.max(minimumFontSize, fontSize) / baseFontSize
 end
 
 local function CreateOverheadText(plate)
@@ -209,6 +218,14 @@ local function GetPlateName(unit, nativeName)
     if IsReadable(text, "string") and text ~= "" then
         return text
     end
+end
+
+local function CanRenderName(unitFrame)
+    if unitFrame:IsForbidden() or IsForbidden(unitFrame.name) then
+        return false
+    end
+    local widgetsOnly = unitFrame.widgetsOnlyMode
+    return not issecretvalue(widgetsOnly) and not widgetsOnly
 end
 
 local function IsTarget(unit)
@@ -431,6 +448,65 @@ function addon.InitializeSimpleNameplates(db)
         return display
     end
 
+    local function RenderName(plate, unit, kind, nativeName, text, subtitle, x, y)
+        local style = kind == "npcName" and styles.npc or styles[kind]
+        local display = HideNative(plate, unit, kind)
+        if not display then
+            return
+        end
+        if not display.name then
+            display.name = CreateOverheadText(plate)
+        end
+        display.name:ClearAllPoints()
+        display.name:SetPoint("CENTER", nativeName, "CENTER")
+
+        if not display.textScale then
+            local zoom = GetReadableCameraZoom() or cameraZoom
+            display.distance = GetUnitDistance(unit, CanCheckInteractionRange())
+            display.textScale = GetTextScale(zoom, display.distance)
+            if visibleSimpleCount == 1 then
+                cameraZoom = zoom
+                events:SetScript("OnUpdate", RefreshTextScale)
+            end
+        end
+        local font, _, flags = nativeName:GetFont()
+        if not IsReadable(font, "string") then
+            font, _, flags = display.name:GetFont()
+        end
+        font = IsReadable(font, "string") and font or nil
+        flags = WithoutOutline(flags)
+        if font then
+            display.name:SetFont(font, baseFontSize, flags)
+        end
+        display.name:SetScale(display.textScale)
+        local r, g, b = GetOverheadColour(unit, style)
+        display.name:SetText(text)
+        display.name:SetTextColor(r, g, b)
+        display.name:Show()
+
+        if style.isPlayer then
+            subtitle = GetGuildTitle(unit)
+        end
+        if subtitle then
+            if not display.subtitle then
+                display.subtitle = CreateOverheadText(plate)
+            end
+            if font then
+                display.subtitle:SetFont(font, baseFontSize, flags)
+            end
+            display.subtitleX, display.subtitleY = x or 0, y or 0
+            display.subtitle:SetScale(display.textScale)
+            display.subtitle:ClearAllPoints()
+            AnchorSubtitle(display)
+            display.subtitle:SetText(subtitle)
+            display.subtitle:SetTextColor(r, g, b)
+            display.subtitle:Show()
+        elseif display.subtitle then
+            display.subtitle:Hide()
+        end
+        return display.name
+    end
+
     local function FilterPlate(plate)
         if plate and plate:IsForbidden() then
             return false
@@ -453,15 +529,30 @@ function addon.InitializeSimpleNameplates(db)
             return nil
         end
         local mode = modes[kind]
-        if mode and mode:IncludesUnit(unit) then
+        local featureName = mode and mode:IncludesUnit(unit)
+        local preserveNPCName = false
+        if kind == "npc" and not featureName then
+            -- The temporary plate displaces the world name. Follow WoW's name rules
+            -- when replacing that text without a feature-specific subtitle.
+            local showName = UnitShouldDisplayName(unit)
+            preserveNPCName = IsReadable(showName, "boolean") and showName
+        end
+        if featureName or preserveNPCName then
             local unitFrame = plate.UnitFrame
             if not unitFrame or not unitFrame.name then
                 return nil
             end
-            if unitFrame:IsForbidden() or IsForbidden(unitFrame.name) then
+            if not CanRenderName(unitFrame) then
                 return false
             end
-            return GetPlateName(unit, unitFrame.name) and true or nil
+            local text = GetPlateName(unit, unitFrame.name)
+            if not text then
+                return nil
+            end
+            if preserveNPCName then
+                return RenderName(plate, unit, "npcName", unitFrame.name, text) ~= nil
+            end
+            return true
         end
         local inCombat = UnitAffectingCombat("player")
         if not IsReadable(inCombat, "boolean") then
@@ -650,7 +741,6 @@ function addon.InitializeSimpleNameplates(db)
     end
 
     function addon.CreateSimpleNameplateMode(kind, legacy, isEnabled, refreshPlates, includesUnit)
-        local style = styles[kind]
         local mode = { legacy = legacy, isEnabled = isEnabled, refreshPlates = refreshPlates }
         local enabled = isEnabled()
         modes[kind] = mode
@@ -678,8 +768,7 @@ function addon.InitializeSimpleNameplates(db)
                 self:ReleasePlate(plate)
                 return nativeName
             end
-            local widgetsOnly = plate.UnitFrame.widgetsOnlyMode
-            if IsForbidden(nativeName) or issecretvalue(widgetsOnly) or widgetsOnly then
+            if not CanRenderName(plate.UnitFrame) then
                 Yield()
                 return nativeName
             end
@@ -694,62 +783,12 @@ function addon.InitializeSimpleNameplates(db)
                 return nativeName
             end
 
-            local display = HideNative(plate, unit, kind)
-            if not display then
+            local name = RenderName(plate, unit, kind, nativeName, text, subtitle, x, y)
+            if not name then
                 Yield()
                 return nativeName
             end
-            if not display.name then
-                display.name = CreateOverheadText(plate)
-            end
-            display.name:ClearAllPoints()
-            display.name:SetPoint("CENTER", nativeName, "CENTER")
-
-            if not display.textScale then
-                local zoom = GetReadableCameraZoom() or cameraZoom
-                display.distance = GetUnitDistance(unit, CanCheckInteractionRange())
-                display.textScale = GetTextScale(zoom, display.distance)
-                if visibleSimpleCount == 1 then
-                    cameraZoom = zoom
-                    events:SetScript("OnUpdate", RefreshTextScale)
-                end
-            end
-            local font, _, flags = nativeName:GetFont()
-            if not IsReadable(font, "string") then
-                font, _, flags = display.name:GetFont()
-            end
-            font = IsReadable(font, "string") and font or nil
-            flags = WithoutOutline(flags)
-            if font then
-                display.name:SetFont(font, baseFontSize, flags)
-            end
-            display.name:SetScale(display.textScale)
-            local r, g, b = GetOverheadColour(unit, style)
-            display.name:SetText(text)
-            display.name:SetTextColor(r, g, b)
-            display.name:Show()
-
-            if style.isPlayer then
-                subtitle = GetGuildTitle(unit)
-            end
-            if subtitle then
-                if not display.subtitle then
-                    display.subtitle = CreateOverheadText(plate)
-                end
-                if font then
-                    display.subtitle:SetFont(font, baseFontSize, flags)
-                end
-                display.subtitleX, display.subtitleY = x or 0, y or 0
-                display.subtitle:SetScale(display.textScale)
-                display.subtitle:ClearAllPoints()
-                AnchorSubtitle(display)
-                display.subtitle:SetText(subtitle)
-                display.subtitle:SetTextColor(r, g, b)
-                display.subtitle:Show()
-            elseif display.subtitle then
-                display.subtitle:Hide()
-            end
-            return display.name
+            return name
         end
 
         function mode:RefreshName(plate, nativeName)
@@ -810,6 +849,8 @@ function addon.InitializeSimpleNameplates(db)
             else
                 QueueReconcile()
             end
+        elseif event == "CVAR_UPDATE" and active and IsReadable(unit, "string") and npcNameSettings[unit:lower()] then
+            RefreshPlates()
         elseif event == "ADDON_LOADED" then
             HookSettingsPanel()
             if active and HasNameplateAddon() then
