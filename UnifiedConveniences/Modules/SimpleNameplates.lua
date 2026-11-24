@@ -93,7 +93,9 @@ local watchedKeys = { [nameOnly:lower()] = true }
 for _, name in ipairs(visibilityKeys) do
     watchedKeys[name:lower()] = true
 end
+local colourblindMode = "colorblindmode"
 local npcNameSettings = {
+    [colourblindMode] = true,
     unitnamenpc = true,
     unitnamefriendlyspecialnpcname = true,
     unitnamehostlenpc = true,
@@ -131,7 +133,7 @@ local function GetReadableCameraZoom()
     end
 end
 
-local function CanCheckInteractionRange()
+local function IsPlayerOutOfCombat()
     local combat = UnitAffectingCombat("player")
     return IsReadable(combat, "boolean") and not combat and not InCombatLockdown()
 end
@@ -220,6 +222,48 @@ local function GetPlateName(unit, nativeName)
     end
 end
 
+local function HasTooltipLineType(line, expectedType)
+    return IsReadable(line, "table") and IsReadable(line.type, "number") and line.type == expectedType
+end
+
+local function ReadNPCTitle(unit, guid)
+    local lineTypes = Enum.TooltipDataLineType
+    if not lineTypes or not C_TooltipInfo or not C_TooltipInfo.GetUnit or not guid:match("^Creature%-") then
+        return
+    end
+    local minion = UnitIsMinion(unit)
+    if not IsReadable(minion, "boolean") or minion then
+        return
+    end
+    local colourblind = C_CVar.GetCVar(colourblindMode)
+    if not IsReadable(colourblind, "string") or (colourblind ~= "0" and colourblind ~= "1") then
+        return
+    end
+
+    local data = C_TooltipInfo.GetUnit(unit)
+    if not IsReadable(data, "table") or not IsReadable(data.lines, "table") then
+        return
+    end
+    if issecretvalue(data.guid) or (data.guid and data.guid ~= guid) then
+        return
+    end
+    -- Forever returns untyped NPC titles after the name and any colourblind reaction line.
+    local line = data.lines[colourblind == "1" and 3 or 2]
+    if not HasTooltipLineType(data.lines[1], lineTypes.UnitName) or not HasTooltipLineType(line, lineTypes.None) then
+        return
+    end
+    local text, right = line.leftText, line.rightText
+    if not IsReadable(text, "string") or issecretvalue(right) or (right and right ~= "") or text:find("[\r\n]") then
+        return
+    end
+    local title = text:match("^%s*(.-)%s*$")
+    title = title:match("^<%s*(.-)%s*>$") or title
+    -- Level text can occupy the same untyped slot on an NPC without a title.
+    if title ~= "" and not (IsReadable(LEVEL, "string") and LEVEL ~= "" and title:lower():find(LEVEL:lower(), 1, true)) then
+        return "<" .. title .. ">"
+    end
+end
+
 local function CanRenderName(unitFrame)
     if unitFrame:IsForbidden() or IsForbidden(unitFrame.name) then
         return false
@@ -268,10 +312,11 @@ function addon.InitializeSimpleNameplates(db)
     if type(saved.enabled) ~= "boolean" then
         saved.enabled = true
     end
-    local active, ready, stopped, transitioning, queued, yielded
+    local active, transitioning, yielded
+    local outdoors = false
     local settingsPanel
     local expectedVisibility, pauseInCombat
-    local pendingUnits, plateRetry = {}, nil
+    local pendingUnits, plateRetry, reconcileTimer = {}, nil, nil
     local waitingForReadyPlate = false
     local visibleSimpleCount = 0
     local cameraZoom, rangeElapsed, scaling = fallbackCameraZoom, 0, false
@@ -309,6 +354,9 @@ function addon.InitializeSimpleNameplates(db)
     end
 
     local function RefreshTextScale(_, elapsed)
+        if not outdoors or not active then
+            return
+        end
         rangeElapsed = rangeElapsed + elapsed
         local checkDistances = rangeElapsed >= rangeCheckInterval
         local zoom = GetReadableCameraZoom() or cameraZoom
@@ -320,7 +368,7 @@ function addon.InitializeSimpleNameplates(db)
         if checkDistances then
             rangeElapsed = 0
         end
-        local canCheckInteractionRange = checkDistances and CanCheckInteractionRange()
+        local canCheckInteractionRange = checkDistances and IsPlayerOutOfCombat()
         local blend = 1 - math.exp(-elapsed / scaleResponseTime)
         for _, display in pairs(displayedUnits) do
             if display.textScale then
@@ -348,12 +396,12 @@ function addon.InitializeSimpleNameplates(db)
         end
     end
 
-    local function ReleaseDisplay(display)
+    local function ReleaseDisplay(display, skipNativeRestore)
         if not display or not display.unit then
             return
         end
         local region = display.hiddenRegion
-        if not IsForbidden(region) then
+        if not skipNativeRestore and not IsForbidden(region) then
             local alpha = region:GetAlpha()
             if IsReadable(alpha, "number") and alpha == 0 then
                 pcall(region.SetAlpha, region, display.originalAlpha)
@@ -375,6 +423,7 @@ function addon.InitializeSimpleNameplates(db)
         displayedUnits[display.unit] = nil
         display.unit, display.guid, display.kind, display.hiddenRegion = nil, nil, nil, nil
         display.distance, display.textScale = nil, nil
+        display.npcTitle = nil
     end
 
     local function RefreshOverlays()
@@ -383,7 +432,7 @@ function addon.InitializeSimpleNameplates(db)
         end
     end
 
-    local function Stop()
+    local function Stop(deferRestoration)
         local wasActive = active
         active = false
         expectedVisibility, pauseInCombat = nil, nil
@@ -391,17 +440,28 @@ function addon.InitializeSimpleNameplates(db)
             plateRetry:Cancel()
             plateRetry = nil
         end
+        if reconcileTimer then
+            reconcileTimer:Cancel()
+            reconcileTimer = nil
+        end
         pendingUnits = {}
         transitioning = true
         for _, display in pairs(displayedUnits) do
-            ReleaseDisplay(display)
+            ReleaseDisplay(display, deferRestoration)
         end
-        local restored = RestoreSettings(saved)
+        local restored = not deferRestoration and RestoreSettings(saved)
         transitioning = false
-        if wasActive then
+        if wasActive and outdoors then
             RefreshOverlays()
         end
         return restored
+    end
+
+    local function Suspend(insideInstance)
+        if outdoors then
+            outdoors = false
+            Stop(insideInstance or IsInInstance())
+        end
     end
 
     local function Yield()
@@ -462,7 +522,7 @@ function addon.InitializeSimpleNameplates(db)
 
         if not display.textScale then
             local zoom = GetReadableCameraZoom() or cameraZoom
-            display.distance = GetUnitDistance(unit, CanCheckInteractionRange())
+            display.distance = GetUnitDistance(unit, IsPlayerOutOfCombat())
             display.textScale = GetTextScale(zoom, display.distance)
             if visibleSimpleCount == 1 then
                 cameraZoom = zoom
@@ -486,6 +546,12 @@ function addon.InitializeSimpleNameplates(db)
 
         if style.isPlayer then
             subtitle = GetGuildTitle(unit)
+        elseif kind == "npcName" then
+            if display.npcTitle == nil and IsPlayerOutOfCombat() then
+                local ok, title = pcall(ReadNPCTitle, unit, display.guid)
+                display.npcTitle = ok and title or false
+            end
+            subtitle = display.npcTitle
         end
         if subtitle then
             if not display.subtitle then
@@ -573,16 +639,24 @@ function addon.InitializeSimpleNameplates(db)
     local function QueuePlateRetry(attempt)
         if not plateRetry then
             local delay = attempt == 1 and 0 or plateRetryDelay
-            plateRetry = C_Timer.NewTimer(delay, function()
+            local timer
+            timer = C_Timer.NewTimer(delay, function()
+                if plateRetry ~= timer then
+                    return
+                end
                 plateRetry = nil
-                if active then
+                if outdoors and active then
                     RefreshPlates(attempt)
                 end
             end)
+            plateRetry = timer
         end
     end
 
     function RefreshPlates(attempt)
+        if not outdoors then
+            return
+        end
         if active then
             local pending, unsafe = false, false
             for unit in pairs(pendingUnits) do
@@ -640,7 +714,7 @@ function addon.InitializeSimpleNameplates(db)
 
     local function CanAcquire()
         local inCombat = UnitAffectingCombat("player")
-        if not saved.enabled or yielded or not settingsPanel or settingsPanel:IsShown() or IsInInstance() or InCombatLockdown()
+        if not saved.enabled or yielded or not settingsPanel or settingsPanel:IsShown() or InCombatLockdown()
             or not IsReadable(inCombat, "boolean") or inCombat or HasNameplateAddon() then
             return false
         end
@@ -716,13 +790,16 @@ function addon.InitializeSimpleNameplates(db)
     end
 
     local function QueueReconcile()
-        if queued or not ready or stopped or waitingForReadyPlate then
+        if reconcileTimer or not outdoors or waitingForReadyPlate then
             return
         end
-        queued = true
-        C_Timer.After(0, function()
-            queued = false
-            if ready and not stopped and not active and not waitingForReadyPlate and Stop() then
+        local timer
+        timer = C_Timer.NewTimer(0, function()
+            if reconcileTimer ~= timer then
+                return
+            end
+            reconcileTimer = nil
+            if outdoors and not active and not waitingForReadyPlate and not IsInInstance() and Stop() then
                 transitioning = true
                 local restored = RestoreLegacySettings()
                 transitioning = false
@@ -731,13 +808,16 @@ function addon.InitializeSimpleNameplates(db)
                 end
             end
         end)
+        reconcileTimer = timer
     end
 
     local function RefreshControlSettings()
         yielded = false
         waitingForReadyPlate = false
-        Stop()
-        QueueReconcile()
+        if outdoors then
+            Stop()
+            QueueReconcile()
+        end
     end
 
     function addon.CreateSimpleNameplateMode(kind, legacy, isEnabled, refreshPlates, includesUnit)
@@ -764,6 +844,9 @@ function addon.InitializeSimpleNameplates(db)
         end
 
         function mode:UpdateName(plate, unit, nativeName, subtitle, x, y)
+            if not outdoors then
+                return nativeName
+            end
             if not active or not self:IncludesUnit(unit) or IsTarget(unit) ~= false then
                 self:ReleasePlate(plate)
                 return nativeName
@@ -815,7 +898,11 @@ function addon.InitializeSimpleNameplates(db)
         if not settingsPanel and SettingsPanel then
             settingsPanel = SettingsPanel
             -- Restore the actual CVars before the native settings panel is drawn.
-            settingsPanel:HookScript("OnShow", Stop)
+            settingsPanel:HookScript("OnShow", function()
+                if outdoors then
+                    Stop()
+                end
+            end)
             settingsPanel:HookScript("OnHide", QueueReconcile)
         end
     end
@@ -834,13 +921,23 @@ function addon.InitializeSimpleNameplates(db)
             return
         end
         if event == "PLAYER_LOGOUT" or event == "PLAYER_LEAVING_WORLD" then
-            ready = false
-            stopped = event == "PLAYER_LOGOUT"
-            Stop()
+            Suspend()
         elseif event == "PLAYER_ENTERING_WORLD" then
-            ready = true
-            waitingForReadyPlate = false
-            QueueReconcile()
+            if IsInInstance() then
+                -- A reload can leave an outdoor restoration pending until the next exit.
+                Suspend(true)
+            else
+                outdoors = true
+                waitingForReadyPlate = false
+                QueueReconcile()
+            end
+        elseif event == "ADDON_LOADED" then
+            HookSettingsPanel()
+            if active and HasNameplateAddon() then
+                Yield()
+            end
+        elseif not outdoors then
+            return
         elseif event == "CVAR_UPDATE" and IsReadable(unit, "string") and watchedKeys[unit:lower()] then
             if active then
                 if unit:lower() == nameOnly:lower() or HasVisibilityChanged(expectedVisibility) then
@@ -850,22 +947,26 @@ function addon.InitializeSimpleNameplates(db)
                 QueueReconcile()
             end
         elseif event == "CVAR_UPDATE" and active and IsReadable(unit, "string") and npcNameSettings[unit:lower()] then
-            RefreshPlates()
-        elseif event == "ADDON_LOADED" then
-            HookSettingsPanel()
-            if active and HasNameplateAddon() then
-                Yield()
+            if unit:lower() == colourblindMode then
+                for _, display in pairs(displayedUnits) do
+                    display.npcTitle = nil
+                end
             end
+            RefreshPlates()
         elseif event == "FORBIDDEN_NAME_PLATE_UNIT_ADDED" and active then
-            Yield()
+            Suspend()
         elseif event == "NAME_PLATE_UNIT_REMOVED" and IsReadable(unit, "string") then
             pendingUnits[unit] = nil
             ReleaseDisplay(displayedUnits[unit])
             if not active then
                 QueueReconcile()
             end
-        elseif (event == "NAME_PLATE_UNIT_ADDED" or event == "UNIT_NAME_UPDATE") and IsReadable(unit, "string") then
+        elseif (active or waitingForReadyPlate) and (event == "NAME_PLATE_UNIT_ADDED" or event == "UNIT_NAME_UPDATE")
+            and IsReadable(unit, "string") then
             local plate = C_NamePlate.GetNamePlateForUnit(unit)
+            if event == "UNIT_NAME_UPDATE" and displays[plate] then
+                displays[plate].npcTitle = nil
+            end
             if active and (event == "NAME_PLATE_UNIT_ADDED" or plate) then
                 local result = FilterPlate(plate)
                 pendingUnits[unit] = not plate and true or nil
