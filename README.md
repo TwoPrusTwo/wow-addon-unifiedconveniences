@@ -4,7 +4,7 @@ A lightweight WoW: Forever QoL addon.
 
 ## Features
 
-- **Zeppelin Destinations** Shows destinations for Zeppelin Masters on mouseover tooltips and on friendly nameplates.
+- **Transport Destinations** Shows fixed routes for Zeppelin Masters, boat and skycutter staff, Druid flight masters, and Sanath Lim-yo on mouseover tooltips and available nameplates.
     - Adjusts label position with horizontal and vertical sliders (default: 0, 10).
 	
 <p align="center">

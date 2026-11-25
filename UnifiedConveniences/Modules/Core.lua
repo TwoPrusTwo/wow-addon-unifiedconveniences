@@ -35,9 +35,14 @@ local numberInputHeight = 22
 local indicatorCategories = addon.friendlyIndicatorCategories
 local colourModes = { "Default", "Class", "Custom" }
 local defaults = {
-    showZeppelinDestination = false,
-    zeppelinVerticalOffset = 10,
-    zeppelinHorizontalOffset = 0,
+    showTransportDestinations = false,
+    transportVerticalOffset = 10,
+    transportHorizontalOffset = 0,
+}
+local legacyTransportKeys = {
+    showTransportDestinations = "showZeppelinDestination",
+    transportVerticalOffset = "zeppelinVerticalOffset",
+    transportHorizontalOffset = "zeppelinHorizontalOffset",
 }
 local indicatorDefaults = {
     enabled = false,
@@ -69,13 +74,39 @@ if not IsFinite(UCOffsetSliderMax) or UCOffsetSliderMax <= 0 then
     UCOffsetSliderMax = defaultSliderMax
 end
 
+local function IsSettingValue(value, default)
+    return type(value) == type(default) and (type(default) ~= "number" or IsFinite(value))
+end
+
 local function ApplyDefaults(settings, values, reset)
     for key, default in pairs(values) do
-        local value = settings[key]
-        if reset or type(value) ~= type(default) or (type(default) == "number" and not IsFinite(value)) then
+        if reset or not IsSettingValue(settings[key], default) then
             settings[key] = default
         end
     end
+end
+
+local function MigrateTransportSettings(db)
+    for key, legacyKey in pairs(legacyTransportKeys) do
+        if not IsSettingValue(db[key], defaults[key]) then
+            db[key] = db[legacyKey]
+        end
+        db[legacyKey] = nil
+    end
+
+    local legacyMode = db.zeppelinNameplateMode
+    local mode = db.transportNameplateMode
+    if type(mode) ~= "table" then
+        db.transportNameplateMode = type(legacyMode) == "table" and legacyMode or {}
+    elseif type(legacyMode) == "table" and type(legacyMode.nameplateRestore) == "table" then
+        if type(mode.nameplateRestore) ~= "table" then
+            mode.nameplateRestore = {}
+        end
+        for cvar, entry in pairs(legacyMode.nameplateRestore) do
+            mode.nameplateRestore[cvar] = mode.nameplateRestore[cvar] or entry
+        end
+    end
+    db.zeppelinNameplateMode = nil
 end
 
 local function IsColourChannel(value)
@@ -559,7 +590,7 @@ local function RegisterDebugOptions(parentCategory, settings, setSimpleNameplate
     Settings.RegisterCanvasLayoutSubcategory(parentCategory, panel, "Debug")
 end
 
-local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
+local function RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
     local panel, defaultsButton = CreateOptionsPanel(title)
     local body = CreateSettingsBody(panel)
     local indicators = db.friendlyIndicators
@@ -587,17 +618,17 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
     y = CreateSectionHeading(body, "Tracking Manager", y - #indicatorCategories * settingsRowStep)
     local nextSectionY, refreshTracking = CreateTrackingRows(body, y, tracking)
 
-    local zeppelinTitle = "Zeppelin Destinations"
-    y = CreateSectionHeading(body, zeppelinTitle, nextSectionY)
-    local zeppelinRow = CreateSettingRow(body, zeppelinTitle, y)
-    local zeppelinCheckbox = CreateCheckbox(zeppelinRow, zeppelinTitle, "Show Zeppelin Master destinations on nameplates and in mouseover tooltips. In the open world, simple NPC names can appear when game and addon nameplates are off.", function(value)
-        db.showZeppelinDestination = value
-        refreshNameplates()
+    local transportTitle = "Transport Destinations"
+    y = CreateSectionHeading(body, transportTitle, nextSectionY)
+    local transportRow = CreateSettingRow(body, transportTitle, y)
+    local transportCheckbox = CreateCheckbox(transportRow, transportTitle, "Show fixed destinations on transport NPC nameplates and in mouseover tooltips. In the open world, simple NPC names can appear when game and addon nameplates are off.", function(value)
+        db.showTransportDestinations = value
+        refreshTransport()
     end)
     y = y - settingsRowStep
-    local refreshZeppelinHorizontal = CreateNumericRow(body, "Horizontal Offset (px)", y, db, "zeppelinHorizontalOffset", refreshNameplates)
+    local refreshTransportHorizontal = CreateNumericRow(body, "Horizontal Offset (px)", y, db, "transportHorizontalOffset", refreshTransport)
     y = y - sliderRowStep
-    local refreshZeppelinVertical = CreateNumericRow(body, "Vertical Offset (px)", y, db, "zeppelinVerticalOffset", refreshNameplates)
+    local refreshTransportVertical = CreateNumericRow(body, "Vertical Offset (px)", y, db, "transportVerticalOffset", refreshTransport)
 
     y = CreateSectionHeading(body, "About", y - sliderRowStep)
     CreateSettingRow(body, "Version: " .. C_AddOns.GetAddOnMetadata(addonName, "Version"), y)
@@ -609,8 +640,8 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         refreshSize()
         refreshIndicatorHorizontal()
         refreshIndicatorVertical()
-        refreshZeppelinHorizontal()
-        refreshZeppelinVertical()
+        refreshTransportHorizontal()
+        refreshTransportVertical()
     end
 
     local function RefreshOptions()
@@ -618,7 +649,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         indicatorsCheckbox:SetChecked(indicators.enabled)
         refreshIndicatorRows()
         refreshTracking()
-        zeppelinCheckbox:SetChecked(db.showZeppelinDestination)
+        transportCheckbox:SetChecked(db.showTransportDestinations)
     end
     defaultsButton:SetScript("OnClick", function()
         cancelColourPreview()
@@ -627,7 +658,7 @@ local function RegisterOptions(db, refreshNameplates, refreshIndicators, preview
         tracking.Reset()
         setSimpleNameplatesEnabled(true)
         RefreshOptions()
-        refreshNameplates()
+        refreshTransport()
         refreshIndicators()
     end)
     panel:SetScript("OnShow", RefreshOptions)
@@ -656,6 +687,7 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
     end
 
     local db = UCDB
+    MigrateTransportSettings(db)
     ApplyDefaults(db, defaults)
     if type(db.friendlyIndicators) ~= "table" then
         db.friendlyIndicators = {}
@@ -664,10 +696,10 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
 
     local setSimpleNameplatesEnabled = addon.InitializeSimpleNameplates(db)
     local preview = {}
-    local refreshNameplates = addon.InitializeZeppelinDestinations(db, defaults.zeppelinVerticalOffset)
+    local refreshTransport = addon.InitializeTransportDestinations(db, defaults.transportVerticalOffset)
     local refreshIndicators = addon.InitializeFriendlyIndicators(db.friendlyIndicators, preview)
     local tracking = addon.InitializeTrackingManager(db)
-    local category = RegisterOptions(db, refreshNameplates, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
+    local category = RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
     addon.CreateTrackingMinimapButton(tracking.PopulateMenu, function()
         Settings.OpenToCategory(category:GetID())
     end)
