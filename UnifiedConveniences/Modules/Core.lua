@@ -50,6 +50,7 @@ local mouseAnchorDefaults = {
     verticalOffset = 0,
 }
 local defaults = {
+    craftTimerEnabled = false,
     showTransportDestinations = false,
     transportVerticalOffset = 10,
     transportHorizontalOffset = 0,
@@ -802,12 +803,20 @@ local function RegisterDebugOptions(parentCategory, settings, setSimpleNameplate
     Settings.RegisterCanvasLayoutSubcategory(parentCategory, panel, "Debug")
 end
 
-local function RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled, refreshAnchor)
+local function RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled, refreshAnchor, refreshCraftTimer)
     local panel, defaultsButton = CreateOptionsPanel(title)
     local body = CreateSettingsBody(panel)
+    local craftTimerTitle = "Craft Timer"
+    local y = CreateSectionHeading(body, craftTimerTitle, -settingsListPadding)
+    local craftTimerRow = CreateSettingRow(body, craftTimerTitle, y)
+    local craftTimerCheckbox = CreateCheckbox(craftTimerRow, craftTimerTitle,
+        "Show crafting time estimates and the remaining time for Create All.", function(value)
+            db.craftTimerEnabled = value
+            refreshCraftTimer()
+        end)
     local indicators = db.friendlyIndicators
     local indicatorsTitle = "Friendly Indicators"
-    local y = CreateSectionHeading(body, indicatorsTitle, -settingsListPadding)
+    y = CreateSectionHeading(body, indicatorsTitle, y - settingsRowStep)
     local indicatorsRow = CreateSettingRow(body, indicatorsTitle, y)
     local indicatorsCheckbox = CreateCheckbox(indicatorsRow, indicatorsTitle, "Show symbols above friendly player names. In the open world, simple names can appear when game and addon nameplates are off.", function(value)
         indicators.enabled = value
@@ -862,6 +871,7 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
 
     local function RefreshOptions()
         RefreshMeasurementControls()
+        craftTimerCheckbox:SetChecked(db.craftTimerEnabled)
         indicatorsCheckbox:SetChecked(indicators.enabled)
         refreshIndicatorRows()
         refreshTooltipControls()
@@ -881,6 +891,7 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
         refreshTransport()
         refreshIndicators()
         refreshAnchor()
+        refreshCraftTimer()
     end)
     panel:SetScript("OnShow", RefreshOptions)
     panel:SetScript("OnHide", function()
@@ -943,8 +954,10 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
     local refreshIndicators = addon.InitializeFriendlyIndicators(db.friendlyIndicators, preview)
     local tracking = addon.InitializeTrackingManager(db)
     local refreshAnchor = addon.InitializeTooltipsMouseAnchor(anchor)
+    local refreshCraftTimer = addon.InitializeCraftTimer(db)
     addon.InitializeTooltipIDs(db.tooltipIDs)
-    local category = RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled, refreshAnchor)
+    local category = RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking,
+        setSimpleNameplatesEnabled, refreshAnchor, refreshCraftTimer)
     addon.CreateTrackingMinimapButton(tracking.PopulateMenu, function()
         Settings.OpenToCategory(category:GetID())
     end)
