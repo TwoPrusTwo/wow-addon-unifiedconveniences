@@ -32,8 +32,22 @@ local maxPreviewSize = 50
 local categoryLabelRight = settingsLabelRight - categorySymbolGap - maxPreviewSize
 local numberInputWidth = 96
 local numberInputHeight = 22
+local settingsButtonGap = 5
+local settingsButtonWidth = 200
+local tooltipDialogWidth, tooltipDialogHeight = 530, 480
+local tooltipDialogHeader, tooltipDialogFooter = 34, 45
+local tooltipDialogInset = 16
+local tooltipDialogButtonWidth, tooltipDialogButtonHeight = 96, 22
 local indicatorCategories = addon.friendlyIndicatorCategories
 local colourModes = { "Default", "Class", "Custom" }
+local mouseAnchorModes = { "Off", "Out of Combat", "Always" }
+local tooltipAlignments = { "Left", "Centre", "Right" }
+local mouseAnchorDefaults = {
+    mode = "Off",
+    align = "Right",
+    horizontalOffset = 0,
+    verticalOffset = 0,
+}
 local defaults = {
     showTransportDestinations = false,
     transportVerticalOffset = 10,
@@ -172,7 +186,7 @@ local function CreateSettingRow(panel, name, y, labelRight)
     label:SetJustifyH("LEFT")
     label:SetWordWrap(false)
     label:SetText(name)
-    return row
+    return row, label
 end
 
 local function CreateNumberInput(row)
@@ -348,10 +362,10 @@ local function RefreshDropdown(control)
     control:UpdateSteppers()
 end
 
-local function CreateSettingsBody(panel)
+local function CreateSettingsBody(panel, left, top, bottom)
     local scroll = CreateFrame("ScrollFrame", nil, panel)
-    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsBodyLeft, -settingsBodyTop)
-    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, settingsBodyBottom)
+    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", left or settingsBodyLeft, -(top or settingsBodyTop))
+    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, bottom or settingsBodyBottom)
     scroll:EnableMouseWheel(true)
 
     local scrollBar = CreateFrame("EventFrame", nil, panel, "MinimalScrollBar")
@@ -570,6 +584,120 @@ local function CreateOptionsPanel(panelTitle)
     return panel, defaultsButton
 end
 
+local function CreateTooltipIDDialog(panel, categories)
+    local dialog = CreateFrame("Frame", "UCTooltipIDsDialog", panel, "ButtonFrameTemplate")
+    dialog:Hide()
+    dialog:SetSize(tooltipDialogWidth, tooltipDialogHeight)
+    dialog:SetPoint("CENTER")
+    dialog:SetFrameStrata("DIALOG")
+    dialog:EnableMouse(true)
+    dialog:SetTitle("Tooltip IDs")
+    if ButtonFrameTemplate_HidePortrait then
+        ButtonFrameTemplate_HidePortrait(dialog)
+    end
+    UISpecialFrames[#UISpecialFrames + 1] = dialog:GetName()
+
+    local body = CreateSettingsBody(dialog, 0, tooltipDialogHeader, tooltipDialogFooter)
+    local checkboxes = {}
+    local y = -settingsListPadding
+    for _, group in ipairs(addon.tooltipIDGroups) do
+        y = CreateSectionHeading(body, group.title, y)
+        for _, category in ipairs(group) do
+            local key, name = unpack(category)
+            local row, label = CreateSettingRow(body, name, y)
+            local checkbox = CreateCheckbox(row, name, nil, function(value)
+                categories[key] = value
+            end)
+            checkbox:ClearAllPoints()
+            checkbox:SetPoint("RIGHT", row, "RIGHT", -tooltipDialogInset, 0)
+            label:SetPoint("RIGHT", checkbox, "LEFT", -settingsButtonGap, 0)
+            checkboxes[key] = checkbox
+            y = y - settingsRowStep
+        end
+    end
+    body:SetHeight(-y + settingsListPadding)
+
+    local function Refresh()
+        for key, checkbox in pairs(checkboxes) do
+            checkbox:SetChecked(categories[key])
+        end
+    end
+
+    local defaultsButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+    defaultsButton:SetSize(tooltipDialogButtonWidth, tooltipDialogButtonHeight)
+    defaultsButton:SetPoint("BOTTOMLEFT", dialog, "BOTTOMLEFT", tooltipDialogInset, tooltipDialogInset)
+    defaultsButton:SetText("Defaults")
+    defaultsButton:SetScript("OnClick", function()
+        addon.ApplyTooltipIDDefaults(categories, true)
+        Refresh()
+    end)
+
+    local closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
+    closeButton:SetSize(tooltipDialogButtonWidth, tooltipDialogButtonHeight)
+    closeButton:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -tooltipDialogInset, tooltipDialogInset)
+    closeButton:SetText(CLOSE)
+    closeButton:SetScript("OnClick", function() dialog:Hide() end)
+    dialog.CloseButton:SetScript("OnClick", function() dialog:Hide() end)
+    dialog:SetScript("OnShow", Refresh)
+    return dialog, Refresh
+end
+
+local function CreateTooltipRows(body, panel, y, anchor, ids, refreshAnchor)
+    local function AddDropdown(label, key, choices, default)
+        local row = CreateSettingRow(body, label, y)
+        y = y - settingsRowStep
+        return CreateSettingsDropdown(row, function(_, menu)
+            for _, choice in ipairs(choices) do
+                menu:CreateRadio(choice, function(value) return anchor[key] == value end, function(value)
+                    anchor[key] = value
+                    refreshAnchor()
+                end, choice)
+            end
+        end, nil, default)
+    end
+
+    local mode = AddDropdown("Mouse Anchor", "mode", mouseAnchorModes, mouseAnchorDefaults.mode)
+    local align = AddDropdown("Align", "align", tooltipAlignments, mouseAnchorDefaults.align)
+    local refreshHorizontal = CreateNumericRow(body, "Horizontal Offset (px)", y, anchor, "horizontalOffset", refreshAnchor)
+    y = y - sliderRowStep
+    local refreshVertical = CreateNumericRow(body, "Vertical Offset (px)", y, anchor, "verticalOffset", refreshAnchor)
+    y = y - sliderRowStep
+    local row = CreateSettingRow(body, "Show IDs", y)
+    local checkbox = CreateCheckbox(row, "Show IDs", "Show selected identifiers in tooltips.", function(value)
+        ids.enabled = value
+    end)
+    local button = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    button:SetWidth(settingsButtonWidth)
+    button:SetPoint("LEFT", checkbox, "RIGHT", settingsButtonGap, 0)
+    button:SetText("Configure")
+    local dialog, refreshDialog
+    button:SetScript("OnClick", function()
+        if not dialog then
+            dialog, refreshDialog = CreateTooltipIDDialog(panel, ids.categories)
+        end
+        dialog:Show()
+    end)
+
+    local function RefreshOffsets()
+        refreshHorizontal()
+        refreshVertical()
+    end
+    local function RefreshControls()
+        RefreshDropdown(mode)
+        RefreshDropdown(align)
+        checkbox:SetChecked(ids.enabled)
+        if refreshDialog then
+            refreshDialog()
+        end
+    end
+    local function CloseDialog()
+        if dialog then
+            dialog:Hide()
+        end
+    end
+    return y - settingsRowStep, RefreshOffsets, RefreshControls, CloseDialog
+end
+
 local function RegisterDebugOptions(parentCategory, settings, setSimpleNameplatesEnabled)
     local panel, defaultsButton = CreateOptionsPanel("Debug")
     local body = CreateSettingsBody(panel)
@@ -590,7 +718,7 @@ local function RegisterDebugOptions(parentCategory, settings, setSimpleNameplate
     Settings.RegisterCanvasLayoutSubcategory(parentCategory, panel, "Debug")
 end
 
-local function RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
+local function RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled, refreshAnchor)
     local panel, defaultsButton = CreateOptionsPanel(title)
     local body = CreateSettingsBody(panel)
     local indicators = db.friendlyIndicators
@@ -615,7 +743,10 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
     local refreshIndicatorRows, cancelColourPreview
     refreshIndicatorRows, cancelColourPreview, refreshSymbolSizes = CreateIndicatorColourRows(body, y, indicators, preview, refreshIndicators)
 
-    y = CreateSectionHeading(body, "Tracking Manager", y - #indicatorCategories * settingsRowStep)
+    y = CreateSectionHeading(body, "Tooltips", y - #indicatorCategories * settingsRowStep)
+    local nextTooltipY, refreshTooltipOffsets, refreshTooltipControls, closeTooltipDialog =
+        CreateTooltipRows(body, panel, y, db.mouseAnchorTooltips, db.tooltipIDs, refreshAnchor)
+    y = CreateSectionHeading(body, "Tracking Manager", nextTooltipY)
     local nextSectionY, refreshTracking = CreateTrackingRows(body, y, tracking)
 
     local transportTitle = "Transport Destinations"
@@ -640,6 +771,7 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
         refreshSize()
         refreshIndicatorHorizontal()
         refreshIndicatorVertical()
+        refreshTooltipOffsets()
         refreshTransportHorizontal()
         refreshTransportVertical()
     end
@@ -648,6 +780,7 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
         RefreshMeasurementControls()
         indicatorsCheckbox:SetChecked(indicators.enabled)
         refreshIndicatorRows()
+        refreshTooltipControls()
         refreshTracking()
         transportCheckbox:SetChecked(db.showTransportDestinations)
     end
@@ -655,14 +788,21 @@ local function RegisterOptions(db, refreshTransport, refreshIndicators, preview,
         cancelColourPreview()
         ApplyDefaults(db, defaults, true)
         ApplyIndicatorDefaults(indicators, true)
+        ApplyDefaults(db.mouseAnchorTooltips, mouseAnchorDefaults, true)
+        db.tooltipIDs.enabled = false
+        addon.ApplyTooltipIDDefaults(db.tooltipIDs.categories, true)
         tracking.Reset()
         setSimpleNameplatesEnabled(true)
         RefreshOptions()
         refreshTransport()
         refreshIndicators()
+        refreshAnchor()
     end)
     panel:SetScript("OnShow", RefreshOptions)
-    panel:SetScript("OnHide", cancelColourPreview)
+    panel:SetScript("OnHide", function()
+        closeTooltipDialog()
+        cancelColourPreview()
+    end)
     panel:RegisterEvent("UI_SCALE_CHANGED")
     panel:RegisterEvent("DISPLAY_SIZE_CHANGED")
     panel:SetScript("OnEvent", RefreshMeasurementControls)
@@ -693,13 +833,34 @@ loader:SetScript("OnEvent", function(self, _, loadedAddonName)
         db.friendlyIndicators = {}
     end
     ApplyIndicatorDefaults(db.friendlyIndicators)
+    if type(db.mouseAnchorTooltips) ~= "table" then
+        db.mouseAnchorTooltips = {}
+    end
+    local anchor = db.mouseAnchorTooltips
+    ApplyDefaults(anchor, mouseAnchorDefaults)
+    if not tContains(mouseAnchorModes, anchor.mode) then
+        anchor.mode = mouseAnchorDefaults.mode
+    end
+    if not tContains(tooltipAlignments, anchor.align) then
+        anchor.align = mouseAnchorDefaults.align
+    end
+    if type(db.tooltipIDs) ~= "table" then
+        db.tooltipIDs = {}
+    end
+    db.tooltipIDs.enabled = db.tooltipIDs.enabled == true
+    if type(db.tooltipIDs.categories) ~= "table" then
+        db.tooltipIDs.categories = {}
+    end
+    addon.ApplyTooltipIDDefaults(db.tooltipIDs.categories)
 
     local setSimpleNameplatesEnabled = addon.InitializeSimpleNameplates(db)
     local preview = {}
     local refreshTransport = addon.InitializeTransportDestinations(db, defaults.transportVerticalOffset)
     local refreshIndicators = addon.InitializeFriendlyIndicators(db.friendlyIndicators, preview)
     local tracking = addon.InitializeTrackingManager(db)
-    local category = RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled)
+    local refreshAnchor = addon.InitializeTooltipsMouseAnchor(anchor)
+    addon.InitializeTooltipIDs(db.tooltipIDs)
+    local category = RegisterOptions(db, refreshTransport, refreshIndicators, preview, tracking, setSimpleNameplatesEnabled, refreshAnchor)
     addon.CreateTrackingMinimapButton(tracking.PopulateMenu, function()
         Settings.OpenToCategory(category:GetID())
     end)

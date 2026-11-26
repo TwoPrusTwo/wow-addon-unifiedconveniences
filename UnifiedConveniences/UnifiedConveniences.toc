@@ -2,7 +2,7 @@
 ## Title: Unified Conveniences
 ## IconTexture: Interface\AddOns\UnifiedConveniences\Textures\UCLogo.tga
 ## Notes: A QoL addon that unifies a bunch of conveniences so I don't have to install single-use addons.
-## Version: 0.3.0
+## Version: 0.4.0
 ## Author: TwoPrusTwo
 ## SavedVariables: UCDB
 ## X-Curse-Project-ID: 1830055
@@ -11,4 +11,6 @@ Modules\SimpleNameplates.lua
 Modules\TransportDestinations.lua
 Modules\FriendlyIndicators.lua
 Modules\TrackingManager.lua
+Modules\TooltipsMouseAnchor.lua
+Modules\TooltipIDs.lua
 Modules\Core.lua

@@ -12,6 +12,7 @@ A lightweight WoW: Forever QoL addon.
 </p>
 
 - **Friendly Indicators** Marks party members ▼, favourite friends ★, friends ●, and guildmates ■ with configurable colours.
+- **Tooltips** Follows the cursor with screen-edge clearance and optionally shows selected IDs for items, spells, NPCs, and more.
 - **Tracking Manager** reapplies tracking while alive and out of combat. Choose **Off**, **Smart**, or an available tracking spell. Smart prioritises gathering and falls back to tracking the current target’s creature type. Dwarves can enable **Find Treasure** independently.
 - Left-click the minimap button for quick tracking settings. Right-click to open the addon options.
 
