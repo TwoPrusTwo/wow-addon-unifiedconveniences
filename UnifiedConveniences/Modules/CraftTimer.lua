@@ -56,7 +56,8 @@ local function UpdateEstimate(button, textState, quantity, duration)
     local label = nativeText
     local enabled = button:IsEnabled()
     if not issecretvalue(enabled) and enabled and duration and IsNumber(quantity) and quantity > 0 then
-        label = ("%s · %s"):format(nativeText, FormatDuration(quantity * duration))
+        local space = nativeText:match("%[%d+%]$") and "" or " "
+        label = ("%s%s[%s]"):format(nativeText, space, FormatDuration(quantity * duration))
     end
     textState.native = nativeText
     textState.estimate = label ~= nativeText and label or nil
@@ -65,10 +66,73 @@ local function UpdateEstimate(button, textState, quantity, duration)
     end
 end
 
+local function CreateBatchDisplay(bar)
+    local fill = CreateFrame("StatusBar", nil, bar)
+    fill:SetAllPoints(bar)
+    fill:SetMinMaxValues(0, 1)
+    fill:Hide()
+    local label = fill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    label:SetPoint("CENTER", fill)
+    return { fill = fill, label = label, hiddenRegions = {} }
+end
+
+local function HideRegion(display, region)
+    if CanAccess(region) then
+        local alpha = region:GetAlpha()
+        if IsNumber(alpha) and alpha > 0 then
+            display.hiddenRegions[region] = alpha
+            region:SetAlpha(0)
+        end
+    end
+end
+
+local function HideDisplay(display)
+    display.fill:Hide()
+    for region, previousAlpha in pairs(display.hiddenRegions) do
+        if CanAccess(region) then
+            local alpha = region:GetAlpha()
+            if IsNumber(alpha) then
+                if alpha == 0 then
+                    region:SetAlpha(previousAlpha)
+                end
+                display.hiddenRegions[region] = nil
+            end
+        end
+    end
+end
+
+local function ApplyBatchFill(display, bar)
+    local nativeFill = bar:GetStatusBarTexture()
+    if not CanAccess(nativeFill) then
+        return false
+    end
+    if not display.hasTexture then
+        local asset = nativeFill:GetAtlas()
+        if issecretvalue(asset) then
+            return false
+        end
+        asset = asset or nativeFill:GetTexture()
+        if issecretvalue(asset) or not asset or not display.fill:SetStatusBarTexture(asset) then
+            return false
+        end
+        local r, g, b, a = bar:GetStatusBarColor()
+        if IsNumber(r) and IsNumber(g) and IsNumber(b) and IsNumber(a) then
+            display.fill:SetStatusBarColor(r, g, b, a)
+        end
+        display.hasTexture = true
+    end
+    -- Leave the native cast state and animations intact while replacing its fill.
+    HideRegion(display, nativeFill)
+    HideRegion(display, bar.Spark)
+    HideRegion(display, bar.CraftGlow)
+    HideRegion(display, bar.CastTimeText)
+    return true
+end
+
 local function InstallCraftTimer(page, events, settings)
     local create, createAll, input = page.CreateButton, page.CreateAllButton, page.CreateMultipleInputBox
     local createText, createAllText = {}, {}
-    local overlays = {}
+    local displays = {}
     local lastRecipeID, lastBatchText, craftable
     local ticker, batch
 
@@ -103,9 +167,9 @@ local function InstallCraftTimer(page, events, settings)
         UpdateEstimate(createAll, createAllText, craftable, duration)
     end
 
-    local function HideLabels()
-        for _, label in pairs(overlays) do
-            label:Hide()
+    local function HideDisplays()
+        for _, display in pairs(displays) do
+            HideDisplay(display)
         end
     end
 
@@ -115,36 +179,44 @@ local function InstallCraftTimer(page, events, settings)
             ticker = nil
         end
         batch = nil
-        HideLabels()
+        HideDisplays()
+        for _, display in pairs(displays) do
+            display.hasTexture = nil
+        end
     end
 
-    local function ShowRemaining(remaining)
+    local function ShowProgress(progress, remaining)
         local overlay = OverlayPlayerCastingBarFrame
         local bar = PlayerCastingBarFrame
         if IsVisible(overlay) and overlay:GetParent() == page.OverlayCastBarAnchor then
             bar = overlay
         end
 
-        for parent, label in pairs(overlays) do
+        for parent, display in pairs(displays) do
             if parent ~= bar then
-                label:Hide()
+                HideDisplay(display)
             end
         end
         if not IsVisible(bar) then
-            HideLabels()
+            HideDisplays()
             return
         end
-        local label = overlays[bar]
-        if not label then
-            label = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            label:SetPoint("CENTER", bar)
-            overlays[bar] = label
+        local display = displays[bar] or CreateBatchDisplay(bar)
+        displays[bar] = display
+        local hasFill = ApplyBatchFill(display, bar)
+        local texture = display.fill:GetStatusBarTexture()
+        if texture then
+            texture:SetShown(hasFill)
+        end
+        if hasFill then
+            local interpolate = progress < 1 and display.fill:IsShown() and Enum.StatusBarInterpolation
+            display.fill:SetValue(progress, interpolate and interpolate.ExponentialEaseOut or nil)
         end
         local text = FormatDuration(remaining)
-        if label:GetText() ~= text then
-            label:SetText(text)
+        if display.label:GetText() ~= text then
+            display.label:SetText(text)
         end
-        label:Show()
+        display.fill:Show()
     end
 
     local function UpdateBatch()
@@ -168,20 +240,22 @@ local function InstallCraftTimer(page, events, settings)
             batch.endTime = endMS / millisecondsPerSecond
             batch.duration = (endMS - startMS) / millisecondsPerSecond
             batch.remaining = remaining
+            batch.total = math.max(batch.total or 0, remaining + 1)
         elseif spellID or (not batch.endTime and now >= batch.startDeadline)
             or (batch.endTime and (batch.remaining == 0 or now >= batch.endTime + betweenCastsTimeout)) then
             Stop()
             return
-        else
-            -- Blizzard can briefly report no cast between two queued crafts.
-            HideLabels()
+        elseif not batch.endTime then
             return
         end
 
-        local remaining = math.max(0, batch.endTime - now) + batch.remaining * batch.duration
+        -- Keep the fill at the completed-craft boundary if there is a short gap before the next cast.
+        local currentRemaining = math.max(0, math.min(batch.duration, batch.endTime - now))
+        local remaining = currentRemaining + batch.remaining * batch.duration
         if remaining > 0 then
-            ShowRemaining(remaining)
-        else
+            local progress = 1 - (batch.remaining + currentRemaining / batch.duration) / batch.total
+            ShowProgress(progress, remaining)
+        elseif now >= batch.endTime + betweenCastsTimeout then
             Stop()
         end
     end
@@ -207,11 +281,17 @@ local function InstallCraftTimer(page, events, settings)
 
     events:SetScript("OnEvent", function(_frame, event, arg, _castGUID, spellID)
         if event == "PLAYER_REGEN_ENABLED" then
+            HideDisplays()
             UpdateButtons()
         elseif not batch then
             return
         elseif event == "UNIT_SPELLCAST_START" or event == "UNIT_SPELLCAST_DELAYED" then
             UpdateBatch()
+        elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+            if not InCombatLockdown() and not issecretvalue(spellID)
+                and spellID == batch.recipeID and batch.remaining == 0 then
+                ShowProgress(1, 0)
+            end
         elseif event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
             if issecretvalue(spellID) or spellID == batch.recipeID then
                 Stop()
@@ -225,7 +305,7 @@ local function InstallCraftTimer(page, events, settings)
         events:RegisterEvent(event)
     end
     for _, event in ipairs({ "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_DELAYED",
-        "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED" }) do
+        "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_SUCCEEDED" }) do
         events:RegisterUnitEvent(event, "player")
     end
     UpdateButtons()
