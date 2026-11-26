@@ -35,9 +35,10 @@ local numberInputHeight = 22
 local settingsButtonGap = 5
 local settingsButtonWidth = 200
 local tooltipDialogWidth, tooltipDialogHeight = 530, 480
-local tooltipDialogHeader, tooltipDialogFooter = 34, 45
-local tooltipDialogInset = 16
-local tooltipDialogButtonWidth, tooltipDialogButtonHeight = 96, 22
+local tooltipContentPadding = 4
+local tooltipCheckboxInset = 16
+local tooltipDialogButtonWidth = 96
+local tooltipSearchHeight = 22
 local indicatorCategories = addon.friendlyIndicatorCategories
 local colourModes = { "Default", "Class", "Custom" }
 local mouseAnchorModes = { "Off", "Out of Combat", "Always" }
@@ -170,15 +171,19 @@ local function FormatPixels(value)
 end
 
 local function CreateSectionHeading(panel, name, y)
-    AddText(panel, name, "GameFontHighlightLarge", settingsRowLeft + settingsSectionInset, y + settingsSectionTitleY)
-    return y - settingsSectionHeight - settingsRowSpacing
+    local heading = AddText(panel, name, "GameFontHighlightLarge", settingsRowLeft + settingsSectionInset, y + settingsSectionTitleY)
+    return y - settingsSectionHeight - settingsRowSpacing, heading
+end
+
+local function PositionSettingRow(row, panel, y)
+    row:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsRowLeft, y)
+    row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, y)
 end
 
 local function CreateSettingRow(panel, name, y, labelRight)
     local row = CreateFrame("Frame", nil, panel)
     row:SetHeight(settingsRowHeight)
-    row:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsRowLeft, y)
-    row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, y)
+    PositionSettingRow(row, panel, y)
 
     local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     label:SetPoint("LEFT", row, "LEFT", settingsLabelInset, 0)
@@ -353,6 +358,10 @@ local function CreateSettingsDropdown(row, populateMenu, checkbox, defaultText)
         dropdown:SetDefaultText(defaultText)
     end
     dropdown:SetupMenu(populateMenu)
+    -- Native arrow picks update the selection text without refreshing the steppers.
+    hooksecurefunc(dropdown, "Pick", function()
+        control:UpdateSteppers()
+    end)
     control:SetSteppersShown(true)
     return control
 end
@@ -362,15 +371,8 @@ local function RefreshDropdown(control)
     control:UpdateSteppers()
 end
 
-local function CreateSettingsBody(panel, left, top, bottom)
-    local scroll = CreateFrame("ScrollFrame", nil, panel)
-    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", left or settingsBodyLeft, -(top or settingsBodyTop))
-    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, bottom or settingsBodyBottom)
+local function CreateScrollBody(scroll, scrollBar)
     scroll:EnableMouseWheel(true)
-
-    local scrollBar = CreateFrame("EventFrame", nil, panel, "MinimalScrollBar")
-    scrollBar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 0, -4)
-    scrollBar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", -1, 7)
     scrollBar:SetHideIfUnscrollable(true)
     ScrollUtil.InitScrollFrameWithScrollBar(scroll, scrollBar)
 
@@ -381,6 +383,17 @@ local function CreateSettingsBody(panel, left, top, bottom)
         body:SetWidth(math.max(1, width))
     end)
     return body
+end
+
+local function CreateSettingsBody(panel)
+    local scroll = CreateFrame("ScrollFrame", nil, panel)
+    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", settingsBodyLeft, -settingsBodyTop)
+    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -settingsScrollBarSpace, settingsBodyBottom)
+
+    local scrollBar = CreateFrame("EventFrame", nil, panel, "MinimalScrollBar")
+    scrollBar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 0, -4)
+    scrollBar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", -1, 7)
+    return CreateScrollBody(scroll, scrollBar)
 end
 
 local function CreateIndicatorColourRows(body, y, settings, preview, refreshIndicators)
@@ -584,6 +597,36 @@ local function CreateOptionsPanel(panelTitle)
     return panel, defaultsButton
 end
 
+local function CreateTooltipDialogSearch(dialog)
+    local header = CreateFrame("Frame", nil, dialog)
+    header:SetPoint("TOP", dialog.TitleContainer, "BOTTOM")
+    header:SetPoint("BOTTOM", dialog.Inset, "TOP")
+    header:SetPoint("LEFT", dialog.Inset, "LEFT")
+    header:SetPoint("RIGHT", dialog.Inset, "RIGHT")
+
+    local search = CreateFrame("EditBox", nil, header, "SearchBoxTemplate")
+    search:SetAutoFocus(false)
+    search:SetHeight(tooltipSearchHeight)
+    local function PositionSearch(_, _, height)
+        local padding = math.max(0, (height - tooltipSearchHeight) / 2)
+        search:SetPoint("TOPLEFT", header, "TOPLEFT", padding, -padding)
+        search:SetPoint("TOPRIGHT", header, "TOPRIGHT", -padding, -padding)
+    end
+    header:SetScript("OnSizeChanged", PositionSearch)
+    PositionSearch(header, nil, header:GetHeight())
+    return search
+end
+
+local function CreateTooltipDialogButton(dialog, corner, text)
+    local button = CreateFrame("Button", nil, dialog, "MagicButtonTemplate")
+    button:SetWidth(tooltipDialogButtonWidth)
+    button:SetPoint(corner, dialog, corner)
+    -- A Lua-created button receives its corner anchor after the template's OnLoad.
+    MagicButton_OnLoad(button)
+    button:SetText(text)
+    return button
+end
+
 local function CreateTooltipIDDialog(panel, categories)
     local dialog = CreateFrame("Frame", "UCTooltipIDsDialog", panel, "ButtonFrameTemplate")
     dialog:Hide()
@@ -597,25 +640,67 @@ local function CreateTooltipIDDialog(panel, categories)
     end
     UISpecialFrames[#UISpecialFrames + 1] = dialog:GetName()
 
-    local body = CreateSettingsBody(dialog, 0, tooltipDialogHeader, tooltipDialogFooter)
-    local checkboxes = {}
-    local y = -settingsListPadding
+    local search = CreateTooltipDialogSearch(dialog)
+    local inset = dialog.Inset
+    local scrollBar = CreateFrame("EventFrame", nil, inset, "MinimalScrollBar")
+    local stepperWidth = math.max(scrollBar.Back:GetWidth(), scrollBar.Forward:GetWidth())
+    local scrollBarPadding = tooltipContentPadding + (stepperWidth - scrollBar:GetWidth()) / 2
+    scrollBar:SetPoint("TOPRIGHT", inset, "TOPRIGHT", -scrollBarPadding, -tooltipContentPadding)
+    scrollBar:SetPoint("BOTTOMRIGHT", inset, "BOTTOMRIGHT", -scrollBarPadding, tooltipContentPadding)
+
+    local scroll = CreateFrame("ScrollFrame", nil, inset)
+    scroll:SetPoint("TOPLEFT", inset, "TOPLEFT", tooltipContentPadding, -tooltipContentPadding)
+    scroll:SetPoint("BOTTOMRIGHT", scrollBar, "BOTTOMLEFT", -scrollBarPadding, 0)
+    local body = CreateScrollBody(scroll, scrollBar)
+    local noMatches = AddText(body, "No matching settings", "GameFontHighlight",
+        settingsRowLeft + settingsSectionInset, -settingsListPadding)
+    local checkboxes, sections = {}, {}
     for _, group in ipairs(addon.tooltipIDGroups) do
-        y = CreateSectionHeading(body, group.title, y)
+        local _, heading = CreateSectionHeading(body, group.title, 0)
+        local section = { heading = heading, rows = {} }
+        sections[#sections + 1] = section
         for _, category in ipairs(group) do
             local key, name = unpack(category)
-            local row, label = CreateSettingRow(body, name, y)
+            local row, label = CreateSettingRow(body, name, 0)
             local checkbox = CreateCheckbox(row, name, nil, function(value)
                 categories[key] = value
             end)
             checkbox:ClearAllPoints()
-            checkbox:SetPoint("RIGHT", row, "RIGHT", -tooltipDialogInset, 0)
+            checkbox:SetPoint("RIGHT", row, "RIGHT", -tooltipCheckboxInset, 0)
             label:SetPoint("RIGHT", checkbox, "LEFT", -settingsButtonGap, 0)
             checkboxes[key] = checkbox
-            y = y - settingsRowStep
+            section.rows[#section.rows + 1] = { frame = row, name = name:lower() }
         end
     end
-    body:SetHeight(-y + settingsListPadding)
+
+    local function Filter()
+        local query = search:GetText():lower():match("^%s*(.-)%s*$")
+        local y = -settingsListPadding
+        for _, section in ipairs(sections) do
+            local firstRowY = y - settingsSectionHeight - settingsRowSpacing
+            local rowY = firstRowY
+            for _, row in ipairs(section.rows) do
+                local matches = row.name:find(query, 1, true) ~= nil
+                row.frame:SetShown(matches)
+                if matches then
+                    PositionSettingRow(row.frame, body, rowY)
+                    rowY = rowY - settingsRowStep
+                end
+            end
+            local hasMatches = rowY ~= firstRowY
+            section.heading:SetShown(hasMatches)
+            if hasMatches then
+                section.heading:SetPoint("TOPLEFT", body, "TOPLEFT", settingsRowLeft + settingsSectionInset,
+                    y + settingsSectionTitleY)
+                y = rowY
+            end
+        end
+        local empty = y == -settingsListPadding
+        noMatches:SetShown(empty)
+        body:SetHeight(-y + settingsListPadding + (empty and settingsRowHeight or 0))
+        scroll:SetVerticalScroll(0)
+    end
+    search:HookScript("OnTextChanged", Filter)
 
     local function Refresh()
         for key, checkbox in pairs(checkboxes) do
@@ -623,22 +708,21 @@ local function CreateTooltipIDDialog(panel, categories)
         end
     end
 
-    local defaultsButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
-    defaultsButton:SetSize(tooltipDialogButtonWidth, tooltipDialogButtonHeight)
-    defaultsButton:SetPoint("BOTTOMLEFT", dialog, "BOTTOMLEFT", tooltipDialogInset, tooltipDialogInset)
-    defaultsButton:SetText("Defaults")
+    local defaultsButton = CreateTooltipDialogButton(dialog, "BOTTOMLEFT", "Defaults")
     defaultsButton:SetScript("OnClick", function()
         addon.ApplyTooltipIDDefaults(categories, true)
         Refresh()
     end)
 
-    local closeButton = CreateFrame("Button", nil, dialog, "UIPanelButtonTemplate")
-    closeButton:SetSize(tooltipDialogButtonWidth, tooltipDialogButtonHeight)
-    closeButton:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -tooltipDialogInset, tooltipDialogInset)
-    closeButton:SetText(CLOSE)
+    local closeButton = CreateTooltipDialogButton(dialog, "BOTTOMRIGHT", CLOSE)
     closeButton:SetScript("OnClick", function() dialog:Hide() end)
     dialog.CloseButton:SetScript("OnClick", function() dialog:Hide() end)
-    dialog:SetScript("OnShow", Refresh)
+    dialog:SetScript("OnShow", function()
+        search:SetText("")
+        Filter()
+        Refresh()
+    end)
+    dialog:SetScript("OnHide", function() search:ClearFocus() end)
     return dialog, Refresh
 end
 

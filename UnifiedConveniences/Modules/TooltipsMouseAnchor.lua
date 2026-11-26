@@ -1,55 +1,37 @@
 local _, addon = ...
 
 local screenMarginPixels = 8
-local cursorGapPixels = 8
-local cursorSizes = { [0] = 32, 48, 64, 96, 128 }
-local automaticCursorSize = 128
-local cursorAnchor = "ANCHOR_CURSOR_RIGHT"
-local preferredSides = {
-    Left = { "left", "right", "above", "below" },
-    Centre = { "above", "below", "right", "left" },
-    Right = { "right", "left", "above", "below" },
-}
+local alignmentFractions = { Left = 1, Centre = 0.5, Right = 0 }
+local fadingTooltips = setmetatable({}, { __mode = "k" })
+
+function addon.TrackTooltipFade(tooltip)
+    if fadingTooltips[tooltip] ~= nil or not tooltip.FadeOut or not tooltip.SetOwner then
+        return
+    end
+    fadingTooltips[tooltip] = false
+    hooksecurefunc(tooltip, "FadeOut", function() fadingTooltips[tooltip] = true end)
+    hooksecurefunc(tooltip, "SetOwner", function() fadingTooltips[tooltip] = false end)
+    tooltip:HookScript("OnShow", function() fadingTooltips[tooltip] = false end)
+end
+
+function addon.IsTooltipFading(tooltip)
+    return fadingTooltips[tooltip] == true
+end
+
+function addon.MarkTooltipActive(tooltip)
+    if fadingTooltips[tooltip] then
+        fadingTooltips[tooltip] = false
+    end
+end
 
 local function IsNumber(value)
     return not issecretvalue(value) and type(value) == "number"
         and value > -math.huge and value < math.huge
 end
 
-local function Clamp(value, minimum, maximum)
-    return math.max(minimum, math.min(maximum, value))
-end
-
-local function PlaceTooltip(mouseX, mouseY, width, height, screenWidth, screenHeight, margin, cursorGap, cursorSize, settings)
-    local minX, minY = margin, margin
-    local maxX, maxY = screenWidth - margin - width, screenHeight - margin - height
-    local cursorLeft, cursorRight = mouseX - cursorGap, mouseX + cursorSize + cursorGap
-    local cursorBottom, cursorTop = mouseY - cursorSize - cursorGap, mouseY + cursorGap
-    local centreX, centreY = mouseX - width / 2, mouseY - height / 2
-    local dx, dy = settings.horizontalOffset, settings.verticalOffset
-
-    if maxX >= minX and maxY >= minY then
-        for _, side in ipairs(preferredSides[settings.align]) do
-            if side == "right" and cursorRight <= maxX then
-                return Clamp(cursorRight + dx, math.max(minX, cursorRight), maxX), Clamp(centreY + dy, minY, maxY)
-            elseif side == "left" and cursorLeft - width >= minX then
-                return Clamp(cursorLeft - width + dx, minX, math.min(maxX, cursorLeft - width)), Clamp(centreY + dy, minY, maxY)
-            elseif side == "above" and cursorTop <= maxY then
-                return Clamp(centreX + dx, minX, maxX), Clamp(cursorTop + dy, math.max(minY, cursorTop), maxY)
-            elseif side == "below" and cursorBottom - height >= minY then
-                return Clamp(centreX + dx, minX, maxX), Clamp(cursorBottom - height + dy, minY, math.min(maxY, cursorBottom - height))
-            end
-        end
-    end
-
-    -- For an oversized tooltip keep its top-left content readable.
-    return Clamp(centreX + dx, minX, math.max(minX, maxX)), Clamp(centreY + dy, math.min(minY, maxY), maxY)
-end
-
-local function ReadDefaultAnchor(tooltip)
-    local anchor = tooltip:GetAnchorType()
+local function ReadDefaultPoints(tooltip)
     local count = tooltip:GetNumPoints()
-    if issecretvalue(anchor) or anchor ~= "ANCHOR_NONE" or not IsNumber(count) or count == 0 then
+    if not IsNumber(count) or count == 0 then
         return
     end
     local points = {}
@@ -67,17 +49,20 @@ local function ReadDefaultAnchor(tooltip)
     return points
 end
 
+local function ReadClamp(tooltip)
+    local enabled = tooltip:IsClampedToScreen()
+    local left, right, top, bottom = tooltip:GetClampRectInsets()
+    if not issecretvalue(enabled) and IsNumber(left) and IsNumber(right) and IsNumber(top) and IsNumber(bottom) then
+        return { enabled = enabled, left, right, top, bottom }
+    end
+end
+
 function addon.InitializeTooltipsMouseAnchor(settings)
     local tooltip = GameTooltip
-    local updates = CreateFrame("Frame")
-    local defaultPoints, appliedX, appliedY
-    local screenWidth, screenHeight, rootScale, anchorScale, pixelsToUI, cursorSize
-    local width, height
-
-    local function ForgetAnchor()
-        updates:SetScript("OnUpdate", nil)
-        defaultPoints, appliedX, appliedY = nil, nil, nil
-    end
+    local events = CreateFrame("Frame")
+    local defaultPoints, appliedAnchor, appliedX, appliedY
+    local originalClamp, appliedMargin
+    local restoreMouseMotion
 
     local function CanPosition()
         if tooltip:IsForbidden() then
@@ -90,32 +75,41 @@ function addon.InitializeTooltipsMouseAnchor(settings)
         return true
     end
 
-    local function RestoreAnchor()
-        updates:SetScript("OnUpdate", nil)
-        if not appliedX or not CanPosition() then
+    local function RestoreFrameSettings()
+        if not (originalClamp or restoreMouseMotion) or not CanPosition() then
             return
         end
-        local anchor = tooltip:GetAnchorType()
-        if issecretvalue(anchor) then
-            return
+        if originalClamp then
+            local saved = originalClamp
+            originalClamp, appliedMargin = nil, nil
+            tooltip:SetClampRectInsets(unpack(saved, 1, 4))
+            tooltip:SetClampedToScreen(saved.enabled)
         end
-        appliedX, appliedY = nil, nil
-        if anchor == cursorAnchor then
+        if restoreMouseMotion then
+            restoreMouseMotion = nil
+            tooltip:EnableMouseMotion(true)
+        end
+    end
+
+    local function ForgetAnchor()
+        defaultPoints, appliedAnchor, appliedX, appliedY = nil, nil, nil, nil
+        RestoreFrameSettings()
+    end
+
+    local function RestoreAnchor(anchor)
+        if appliedAnchor and anchor == appliedAnchor then
+            appliedAnchor, appliedX, appliedY = nil, nil, nil
             tooltip:SetAnchorType("ANCHOR_NONE")
             tooltip:ClearAllPoints()
             for _, point in ipairs(defaultPoints) do
                 tooltip:SetPoint(unpack(point, 1, 5))
             end
-        else
-            defaultPoints = nil
         end
+        RestoreFrameSettings()
     end
 
     local function ShouldFollow()
-        if not defaultPoints or settings.mode == "Off" or not CanPosition() then
-            return false
-        end
-        if EditModeManagerFrame and EditModeManagerFrame:IsEditModeActive() then
+        if settings.mode == "Off" or (EditModeManagerFrame and EditModeManagerFrame:IsEditModeActive()) then
             return false
         end
         if settings.mode == "Out of Combat" then
@@ -125,92 +119,86 @@ function addon.InitializeTooltipsMouseAnchor(settings)
         return true
     end
 
-    local function Reposition()
-        if tooltip:IsForbidden() then
-            ForgetAnchor()
+    local function Refresh()
+        if not CanPosition() or addon.IsTooltipFading(tooltip) then
             return
         end
-        local mouseX, mouseY = GetCursorPosition()
-        if not IsNumber(mouseX) or not IsNumber(mouseY) then
-            RestoreAnchor()
-            return
-        end
-        mouseX, mouseY = mouseX / rootScale, mouseY / rootScale
-        local x, y = PlaceTooltip(mouseX, mouseY, width, height, screenWidth, screenHeight,
-            screenMarginPixels * pixelsToUI, cursorGapPixels * pixelsToUI, cursorSize, settings)
-        local offsetX, offsetY = (x - mouseX) / anchorScale, (y + height - mouseY) / anchorScale
-        if offsetX == appliedX and offsetY == appliedY then
-            return
-        end
-        if not CanPosition() then
-            updates:SetScript("OnUpdate", nil)
+        if not defaultPoints then
+            RestoreFrameSettings()
             return
         end
         local anchor = tooltip:GetAnchorType()
-        if issecretvalue(anchor) then
-            RestoreAnchor()
-            return
-        end
-        if anchor ~= (appliedX and cursorAnchor or "ANCHOR_NONE") then
+        if issecretvalue(anchor) or anchor ~= (appliedAnchor or "ANCHOR_NONE") then
             ForgetAnchor()
             return
         end
-        -- Native cursor anchors use the tooltip's top edge as their vertical reference.
-        appliedX, appliedY = offsetX, offsetY
-        tooltip:SetAnchorType(cursorAnchor, offsetX, offsetY)
-    end
-
-    local function Refresh()
         if not ShouldFollow() then
-            RestoreAnchor()
+            RestoreAnchor(anchor)
             return
         end
         local visible = tooltip:IsVisible()
         if issecretvalue(visible) or visible ~= true then
-            RestoreAnchor()
             return
         end
-        local tooltipWidth, tooltipHeight = tooltip:GetSize()
-        local tooltipScale = tooltip:GetEffectiveScale()
-        rootScale = UIParent:GetEffectiveScale()
-        screenWidth, screenHeight = UIParent:GetSize()
-        if not IsNumber(tooltipWidth) or not IsNumber(tooltipHeight) or not IsNumber(tooltipScale)
-            or not IsNumber(screenWidth) or not IsNumber(screenHeight) or not IsNumber(rootScale)
-            or tooltipWidth <= 0 or tooltipHeight <= 0 or tooltipScale <= 0 or rootScale <= 0 then
-            RestoreAnchor()
+        local width, height = tooltip:GetSize()
+        local scale, parentScale = tooltip:GetEffectiveScale(), UIParent:GetEffectiveScale()
+        local screenWidth, screenHeight = UIParent:GetSize()
+        if not IsNumber(width) or not IsNumber(height) or not IsNumber(scale) or not IsNumber(parentScale)
+            or not IsNumber(screenWidth) or not IsNumber(screenHeight)
+            or width <= 0 or height <= 0 or scale <= 0 or parentScale <= 0 then
+            RestoreAnchor(anchor)
             return
         end
-        anchorScale = tooltipScale / rootScale
-        width, height = tooltipWidth * anchorScale, tooltipHeight * anchorScale
-        pixelsToUI = PixelUtil.GetPixelToUIUnitFactor() / rootScale
-        local size = C_CVar.GetCVar("cursorSizePreferred")
-        size = not issecretvalue(size) and tonumber(size) or nil
-        cursorSize = (cursorSizes[size] or automaticCursorSize) * pixelsToUI
-        Reposition()
-        if defaultPoints and appliedX then
-            updates:SetScript("OnUpdate", Reposition)
+
+        local unitScale = parentScale / scale
+        local dx = math.max(-screenWidth, math.min(screenWidth, settings.horizontalOffset)) * unitScale
+        local x = dx - width * alignmentFractions[settings.align]
+        local y = math.max(-screenHeight, math.min(screenHeight, settings.verticalOffset)) * unitScale
+        local cursorAnchor = "ANCHOR_CURSOR_RIGHT"
+        if settings.align == "Centre" and settings.horizontalOffset == 0 and settings.verticalOffset == 0 then
+            cursorAnchor, x, y = "ANCHOR_CURSOR", nil, nil
+        end
+
+        if not originalClamp then
+            originalClamp = ReadClamp(tooltip)
+        end
+        local margin = screenMarginPixels * PixelUtil.GetPixelToUIUnitFactor() / scale
+        if originalClamp and appliedMargin ~= margin then
+            appliedMargin = margin
+            tooltip:SetClampRectInsets(-margin, margin, margin, -margin)
+            tooltip:SetClampedToScreen(true)
+        end
+        local mouseMotion = tooltip:IsMouseMotionEnabled()
+        if not issecretvalue(mouseMotion) and mouseMotion == true then
+            -- A tooltip following the pointer should not become its new hover target.
+            restoreMouseMotion = true
+            tooltip:EnableMouseMotion(false)
+        end
+        if cursorAnchor ~= appliedAnchor or x ~= appliedX or y ~= appliedY then
+            appliedAnchor, appliedX, appliedY = cursorAnchor, x, y
+            tooltip:SetAnchorType(cursorAnchor, x, y)
         end
     end
 
+    addon.TrackTooltipFade(tooltip)
     hooksecurefunc(tooltip, "SetOwner", ForgetAnchor)
     hooksecurefunc("GameTooltip_SetDefaultAnchor", function(frame)
         if frame ~= tooltip or frame:IsForbidden() then
             return
         end
-        defaultPoints = ReadDefaultAnchor(frame)
-        Refresh()
+        local anchor = frame:GetAnchorType()
+        if not issecretvalue(anchor) and anchor == "ANCHOR_NONE" then
+            defaultPoints = ReadDefaultPoints(frame)
+            Refresh()
+        end
     end)
     tooltip:HookScript("OnShow", Refresh)
     tooltip:HookScript("OnHide", ForgetAnchor)
     tooltip:HookScript("OnSizeChanged", Refresh)
 
-    for _, event in ipairs({ "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "UI_SCALE_CHANGED", "DISPLAY_SIZE_CHANGED", "CVAR_UPDATE" }) do
-        updates:RegisterEvent(event)
+    for _, event in ipairs({ "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "UI_SCALE_CHANGED", "DISPLAY_SIZE_CHANGED" }) do
+        events:RegisterEvent(event)
     end
-    updates:SetScript("OnEvent", function(_, event, cvar)
-        if event ~= "CVAR_UPDATE" or (not issecretvalue(cvar) and cvar == "cursorSizePreferred") then
-            Refresh()
-        end
-    end)
+    events:SetScript("OnEvent", Refresh)
     return Refresh
 end

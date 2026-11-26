@@ -1,45 +1,47 @@
 local _, addon = ...
 
 local groups = {
+    { title = "Collections and assets",
+        { "appearanceSources", "Appearance Sources" },
+        { "appearances", "Appearances" },
+        { "pets", "Companion Pet Species" },
+        { "icons", "Icon File IDs" },
+        { "mounts", "Mounts", true },
+        { "outfits", "Outfits" },
+        { "toys", "Toys" },
+    },
     { title = "Common",
+        { "currencies", "Currencies" },
         { "items", "Items", true },
-        { "spells", "Spells", true },
         { "npcs", "NPCs", true },
         { "quests", "Quests" },
+        { "spells", "Spells", true },
         { "objects", "World Objects" },
-        { "currencies", "Currencies" },
     },
     { title = "Equipment",
-        { "equipmentSets", "Equipment Sets", true },
-        { "slots", "Slot IDs", true },
+        { "bagSlots", "Bag Slot IDs" },
         { "enchants", "Enchants" },
+        { "equipmentSets", "Equipment Sets" },
+        { "equipmentSlots", "Equipment Slot IDs" },
         { "gems", "Gems" },
         { "bonuses", "Item Bonuses" },
-        { "itemSets", "Item Sets" },
         { "expansions", "Item Expansions" },
-    },
-    { title = "Progression and actions",
-        { "talentNodes", "Talent Nodes" },
-        { "talentEntries", "Talent Entries" },
-        { "talentDefinitions", "Talent Definitions" },
-        { "achievements", "Achievements and Legacy Challenges" },
-        { "criteria", "Achievement Criteria" },
-        { "factions", "Factions" },
-        { "macros", "Macros" },
-    },
-    { title = "Collections and assets",
-        { "mounts", "Mounts", true },
-        { "pets", "Companion Pet Species" },
-        { "toys", "Toys" },
-        { "appearances", "Appearances" },
-        { "appearanceSources", "Appearance Sources" },
-        { "outfits", "Outfits" },
-        { "icons", "Icon File IDs" },
+        { "itemSets", "Item Sets" },
     },
     { title = "Map",
         { "maps", "Maps" },
         { "pointsOfInterest", "Points of Interest" },
         { "vignettes", "Vignettes" },
+    },
+    { title = "Progression and actions",
+        { "criteria", "Achievement Criteria" },
+        { "achievements", "Achievements and Legacy Challenges" },
+        { "actionSlots", "Action Bar Slot IDs" },
+        { "factions", "Factions" },
+        { "macros", "Macros" },
+        { "talentDefinitions", "Talent Definitions" },
+        { "talentEntries", "Talent Entries" },
+        { "talentNodes", "Talent Nodes" },
     },
 }
 addon.tooltipIDGroups = groups
@@ -61,9 +63,9 @@ local tooltipNames = {
     "ItemRefShoppingTooltip1", "ItemRefShoppingTooltip2", "WorldMapTooltip", "EmbeddedItemTooltip",
 }
 local slotSources = {
-    GetInventoryItem = { { "Equipment Slot ID", 2 } },
-    GetBagItem = { { "Bag ID", 1, true }, { "Bag Slot", 2 } },
-    GetAction = { { "Action Slot", 1 } },
+    GetInventoryItem = { category = "equipmentSlots", { "Equipment Slot ID", 2 } },
+    GetBagItem = { category = "bagSlots", { "Bag ID", 1, true }, { "Bag Slot", 2 } },
+    GetAction = { category = "actionSlots", { "Action Slot", 1 } },
 }
 local guidPattern = "^(%a+)%-%d+%-%d+%-%d+%-%d+%-(%d+)%-%x+$"
 local supportedTypes = {
@@ -139,7 +141,7 @@ local function AppendID(tooltip, label, id)
             end
         end
     end
-    GameTooltip_AddNormalLine(tooltip, text)
+    GameTooltip_AddColoredLine(tooltip, text, GRAY_FONT_COLOR)
     return true
 end
 
@@ -257,6 +259,9 @@ function addon.InitializeTooltipIDs(settings)
     end
 
     local function AddFromData(tooltip, data)
+        if not issecretvalue(tooltip) then
+            addon.MarkTooltipActive(tooltip)
+        end
         if not settings.enabled or not IsAccessible(tooltip) then
             return
         end
@@ -271,10 +276,11 @@ function addon.InitializeTooltipIDs(settings)
         local id = Field(data, "id")
         local info = tooltip.GetProcessingTooltipInfo and tooltip:GetProcessingTooltipInfo()
         local getter, args = Field(info, "getterName"), Field(info, "getterArgs")
-        if categories.slots and slotSources[getter] then
-            for _, slot in ipairs(slotSources[getter]) do
+        local slots = slotSources[getter]
+        if slots and categories[slots.category] then
+            for _, slot in ipairs(slots) do
                 local label, arg, signed = unpack(slot)
-                Add(tooltip, "slots", Field(args, arg), label, signed, signed)
+                Add(tooltip, slots.category, Field(args, arg), label, signed, signed)
             end
         end
         if getter == "GetTraitEntry" then
@@ -348,7 +354,7 @@ function addon.InitializeTooltipIDs(settings)
         end
         for _, name in ipairs(tooltipNames) do
             local tooltip = _G[name]
-            if IsAccessible(tooltip) and tooltip.GetOwner and tooltip.NumLines then
+            if IsAccessible(tooltip) and not addon.IsTooltipFading(tooltip) and tooltip.GetOwner and tooltip.NumLines then
                 local visible, currentOwner = tooltip:IsVisible(), tooltip:GetOwner()
                 if not issecretvalue(visible) and visible and not issecretvalue(currentOwner) and currentOwner == owner
                     and append(tooltip) then
@@ -368,6 +374,12 @@ function addon.InitializeTooltipIDs(settings)
     end
 
     local function InstallPanelHooks()
+        for _, name in ipairs(tooltipNames) do
+            local tooltip = _G[name]
+            if IsAccessible(tooltip) then
+                addon.TrackTooltipFade(tooltip)
+            end
+        end
         if TalentDisplayMixin then
             Hook(TalentDisplayMixin, "SetTooltipInternal", function(button)
                 if not (categories.talentNodes or categories.talentEntries or categories.talentDefinitions) then
@@ -403,9 +415,9 @@ function addon.InitializeTooltipIDs(settings)
             end
         end)
         Hook(nil, "PaperDollItemSlotButton_OnEnter", function(button)
-            if categories.slots then
+            if categories.equipmentSlots then
                 AddToOwnedTooltips(button, function(tooltip)
-                    return Add(tooltip, "slots", button:GetID(), "Equipment Slot ID")
+                    return Add(tooltip, "equipmentSlots", button:GetID(), "Equipment Slot ID")
                 end)
             end
         end)

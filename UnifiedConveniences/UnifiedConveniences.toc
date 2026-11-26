@@ -2,7 +2,7 @@
 ## Title: Unified Conveniences
 ## IconTexture: Interface\AddOns\UnifiedConveniences\Textures\UCLogo.tga
 ## Notes: A QoL addon that unifies a bunch of conveniences so I don't have to install single-use addons.
-## Version: 0.4.0
+## Version: 0.4.3
 ## Author: TwoPrusTwo
 ## SavedVariables: UCDB
 ## X-Curse-Project-ID: 1830055
