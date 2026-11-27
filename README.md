@@ -4,6 +4,8 @@ A lightweight WoW: Forever QoL addon.
 
 ## Features
 
+- **Craft Timer** Shows total craft times in the create buttons and crafting cast bar.
+    - `Create [0:03]` and `Create All [17][0:51]`.
 - **Transport Destinations** Shows fixed routes for Zeppelin Masters, boat and skycutter staff, Druid flight masters, and Sanath Lim-yo on mouseover tooltips and available nameplates.
 	
 <p align="center">
