@@ -5,6 +5,7 @@ local secondsPerMinute = 60
 local updateInterval = 0.2
 local castStartTimeout = 3
 local betweenCastsTimeout = 2
+local maxRunningProgress = 0.999
 local buttonSidePadding = 6
 local quantityArrowGap = 4
 local castBarLayers = { "BACKGROUND", "BORDER", "ARTWORK", "OVERLAY", "HIGHLIGHT" }
@@ -112,101 +113,60 @@ local function UpdateEstimate(button, textState, quantity, duration, quantityArr
 end
 
 local function CreateBatchDisplay()
-    local fill = CreateFrame("StatusBar", nil, UIParent)
-    fill:SetMinMaxValues(0, 1)
-    fill:Hide()
-
-    local function AddBarTexture(layer, atlas, padding)
-        local texture = fill:CreateTexture(nil, layer)
-        texture:SetAtlas(atlas)
-        texture:SetPoint("TOPLEFT", fill, "TOPLEFT", -padding, padding)
-        texture:SetPoint("BOTTOMRIGHT", fill, "BOTTOMRIGHT", padding, -padding)
-    end
-
-    -- Match the native cast bar's background and frame extents.
-    AddBarTexture("BACKGROUND", "ui-castingbar-background", 1)
-    AddBarTexture("OVERLAY", "ui-castingbar-frame", 2)
-    local glow = fill:CreateTexture(nil, "OVERLAY", nil, 1)
-    glow:SetAtlas("cast_crafting_pipglow", true)
-    glow:SetBlendMode("ADD")
-    local spark = fill:CreateTexture(nil, "OVERLAY", nil, 2)
-    spark:SetAtlas("ui-castingbar-pip", true)
-    glow:SetPoint("RIGHT", spark, "LEFT", 2, 0)
-
-    -- Clip the tip horizontally while preserving the native glow above and below the bar.
-    local tipMask = fill:CreateMaskTexture()
-    tipMask:SetTexture("Interface\\Buttons\\WHITE8X8", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE", "NEAREST")
-    tipMask:SetPoint("LEFT", fill, "LEFT")
-    tipMask:SetPoint("RIGHT", fill, "RIGHT")
-    spark:AddMaskTexture(tipMask)
-    glow:AddMaskTexture(tipMask)
-
-    local label = fill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    label:SetPoint("CENTER", fill)
-    return { fill = fill, label = label, spark = spark, glow = glow, tipMask = tipMask }
-end
-
-local function MatchTextureSize(texture, source)
-    if CanAccess(source) then
-        local width, height = source:GetSize()
-        if IsNumber(width) and IsNumber(height) and width > 0 and height > 0 then
-            texture:SetSize(width, height)
-        end
-    end
+    local display = CreateFrame("StatusBar", nil, UIParent, "CastingBarFrameTemplate")
+    display:Hide()
+    display.Countdown = display:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    display.Countdown:SetPoint("CENTER", display)
+    return display
 end
 
 local function PrepareBatchDisplay(display, bar, anchor)
-    local nativeFill = bar:GetStatusBarTexture()
-    if not CanAccess(nativeFill) then
-        return false
-    end
-    local asset = nativeFill:GetAtlas()
-    if issecretvalue(asset) then
-        return false
-    end
-    asset = asset or nativeFill:GetTexture()
     local width, height = bar:GetSize()
     local scale, rootScale = bar:GetEffectiveScale(), UIParent:GetEffectiveScale()
-    if issecretvalue(asset) or not asset or not IsNumber(width) or not IsNumber(height)
-        or width <= 0 or height <= 0 or not IsNumber(scale) or not IsNumber(rootScale)
+    local look, strata, level = bar.look, bar:GetFrameStrata(), bar:GetFrameLevel()
+    if issecretvalue(look) or issecretvalue(strata) or not IsNumber(level)
+        or not IsNumber(width) or not IsNumber(height) or width <= 0 or height <= 0
+        or not IsNumber(scale) or not IsNumber(rootScale)
         or scale <= 0 or rootScale <= 0 then
         return false
     end
-    local fill = display.fill
-    if not fill:SetStatusBarTexture(asset) then
-        return false
-    end
-    local r, g, b, a = bar:GetStatusBarColor()
-    if IsNumber(r) and IsNumber(g) and IsNumber(b) and IsNumber(a) then
-        fill:SetStatusBarColor(r, g, b, a)
-    end
-    fill:SetFrameStrata("HIGH")
-    fill:SetScale(scale / rootScale)
-    fill:SetSize(width, height)
-    fill:ClearAllPoints()
-    fill:SetPoint("CENTER", anchor or bar)
-    MatchTextureSize(display.spark, bar.Spark)
-    MatchTextureSize(display.glow, bar.CraftGlow)
-    display.tipMask:SetHeight(math.max(height, display.spark:GetHeight(), display.glow:GetHeight()))
-    display.spark:ClearAllPoints()
-    display.spark:SetPoint("CENTER", fill:GetStatusBarTexture(), "RIGHT")
+    display.playCastFX = true
+    display:SetLook(look)
+    display:SetFrameStrata(strata)
+    display:SetFrameLevel(level)
+    display:SetScale(scale / rootScale)
+    display:SetSize(width, height)
+    display:ClearAllPoints()
+    display:SetPoint("CENTER", anchor or bar)
+    display:SetNameTextShown(IsVisible(bar.Text) == true)
+    display.TextBorder:SetShown(IsVisible(bar.TextBorder) == true)
+    display:SetIconShown(IsVisible(bar.Icon) == true)
     return true
 end
 
 local function SuppressBar(bar, suppressedBars)
-    if not CanAccess(bar) or suppressedBars[bar] then
-        return
+    if not CanAccess(bar) then
+        return false
+    end
+    if suppressedBars[bar] then
+        return true
     end
     local layers = {}
-    suppressedBars[bar] = layers
-    -- Native fades and fill changes run normally while their drawing is suspended.
     for _, layer in ipairs(castBarLayers) do
         local enabled = bar:IsDrawLayerEnabled(layer)
-        if not issecretvalue(enabled) and enabled == true then
+        if issecretvalue(enabled) then
+            return false
+        end
+        if enabled then
             layers[#layers + 1] = layer
-            bar:SetDrawLayerEnabled(layer, false)
         end
     end
+    -- Native fades and fill changes run normally while their drawing is suspended.
+    suppressedBars[bar] = layers
+    for _, layer in ipairs(layers) do
+        bar:SetDrawLayerEnabled(layer, false)
+    end
+    return true
 end
 
 local function InstallCraftTimer(page, events, settings)
@@ -272,8 +232,10 @@ local function InstallCraftTimer(page, events, settings)
             ticker = nil
         end
         batch = nil
-        if display then
-            display.fill:Hide()
+        if display and not finished then
+            display:StopAnims()
+            display:HideSpark()
+            display:Hide()
         end
         RestoreBars(finished == true)
     end
@@ -282,37 +244,66 @@ local function InstallCraftTimer(page, events, settings)
         local overlay = OverlayPlayerCastingBarFrame
         if CanAccess(overlay) then
             local parent = overlay:GetParent()
-            if not issecretvalue(parent) and parent == page.OverlayCastBarAnchor then
+            if CanAccess(parent) and parent == page.OverlayCastBarAnchor then
                 return parent
             end
         end
     end
 
-    local function ShowProgress(progress, remaining)
-        if not batch.displayReady then
-            local anchor = IsVisible(OverlayPlayerCastingBarFrame) and GetOverlayAnchor()
-            local bar = anchor and OverlayPlayerCastingBarFrame or PlayerCastingBarFrame
-            if not IsVisible(bar) then
-                return
-            end
-            display = display or CreateBatchDisplay()
-            if not PrepareBatchDisplay(display, bar, anchor) then
-                return
-            end
-            batch.displayReady = true
-            SuppressBar(bar, suppressedBars)
-            -- Blizzard can hand the cast back to the HUD bar while the batch is active.
-            SuppressBar(PlayerCastingBarFrame, suppressedBars)
+    local function DrawProgress()
+        if not batch then
+            return
         end
-        local interpolate = progress < 1 and display.fill:IsShown() and Enum.StatusBarInterpolation
-        display.fill:SetValue(progress, interpolate and interpolate.ExponentialEaseOut or nil)
-        display.spark:SetShown(progress < 1)
-        display.glow:SetShown(progress < 1)
-        local text = FormatDuration(remaining)
-        if display.label:GetText() ~= text then
-            display.label:SetText(text)
+        -- Between casts, the fill holds at the last completed craft.
+        local currentRemaining = math.max(0, math.min(batch.duration, batch.endTime - GetTime()))
+        local progress = 1 - (batch.remaining + currentRemaining / batch.duration) / batch.total
+        local seconds = math.ceil(currentRemaining + batch.remaining * batch.duration)
+        if seconds ~= batch.displayedSeconds then
+            display.Countdown:SetText(FormatDuration(seconds))
+            batch.displayedSeconds = seconds
         end
-        display.fill:Show()
+        -- Use the native spark positioning without letting its clock finish the cast.
+        display.value = math.min(progress, maxRunningProgress)
+        display:OnUpdate(0)
+    end
+
+    local function StartDisplay(spellText, icon)
+        local anchor = IsVisible(OverlayPlayerCastingBarFrame) and GetOverlayAnchor()
+        local bar = anchor and OverlayPlayerCastingBarFrame or PlayerCastingBarFrame
+        if not IsVisible(bar) then
+            return
+        end
+        if not display then
+            display = CreateBatchDisplay()
+            display:SetScript("OnUpdate", DrawProgress)
+        end
+        if not PrepareBatchDisplay(display, bar, anchor) or not SuppressBar(bar, suppressedBars) then
+            return
+        end
+        -- Blizzard can hand the cast back to the HUD while the batch is active.
+        if bar ~= PlayerCastingBarFrame and not SuppressBar(PlayerCastingBarFrame, suppressedBars)
+            and IsVisible(PlayerCastingBarFrame) then
+            RestoreBar(bar)
+            return
+        end
+        batch.displayReady = true
+        display:SimulateCast({
+            barType = CastingBarType.ApplyingCrafting,
+            castTime = 1,
+            spellName = not issecretvalue(spellText) and spellText or "",
+            iconTexture = not issecretvalue(icon) and icon or nil,
+        })
+        DrawProgress()
+    end
+
+    local function FinishBatch()
+        if batch.displayReady then
+            display.Countdown:SetText(FormatDuration(0))
+            display:FinishSpell()
+            Stop(true)
+        else
+            Stop()
+        end
     end
 
     local function UpdateBatch()
@@ -321,38 +312,33 @@ local function InstallCraftTimer(page, events, settings)
             return
         end
         local now = GetTime()
-        local _, _, _, startMS, endMS, isTradeSkill, _, _, spellID = UnitCastingInfo("player")
-        if issecretvalue(spellID) or issecretvalue(startMS) or issecretvalue(endMS) then
+        if batch.stopDeadline and now >= batch.stopDeadline then
+            Stop()
+            return
+        end
+        local _, spellText, icon, startMS, endMS, isTradeSkill, castID, _, spellID = UnitCastingInfo("player")
+        if issecretvalue(spellID) or issecretvalue(castID) or issecretvalue(startMS) or issecretvalue(endMS) then
             Stop()
             return
         end
         if isTradeSkill == true and spellID == batch.recipeID and IsNumber(startMS) and IsNumber(endMS)
             and endMS > startMS then
             local remaining = C_TradeSkillUI.GetRemainingRecasts()
-            if not IsNumber(remaining) or remaining < 0 then
+            if not IsNumber(remaining) or remaining < 0
+                or (batch.remaining == 0 and batch.castID ~= castID) then
                 Stop()
                 return
             end
+            batch.castID = castID
             batch.endTime = endMS / millisecondsPerSecond
             batch.duration = (endMS - startMS) / millisecondsPerSecond
             batch.remaining = remaining
             batch.total = math.max(batch.total or 0, remaining + 1)
-        elseif spellID or (not batch.endTime and now >= batch.startDeadline)
-            or (batch.endTime and (batch.remaining == 0 or now >= batch.endTime + betweenCastsTimeout)) then
-            Stop(batch.finished and not spellID)
-            return
-        elseif not batch.endTime then
-            return
-        end
-
-        -- Keep the fill at the completed-craft boundary if there is a short gap before the next cast.
-        local currentRemaining = math.max(0, math.min(batch.duration, batch.endTime - now))
-        local remaining = currentRemaining + batch.remaining * batch.duration
-        if remaining > 0 then
-            local progress = 1 - (batch.remaining + currentRemaining / batch.duration) / batch.total
-            ShowProgress(progress, remaining)
-        elseif now >= batch.endTime + betweenCastsTimeout then
-            Stop(batch.finished)
+            if not batch.displayReady then
+                StartDisplay(spellText, icon)
+            end
+        elseif spellID or now >= (batch.endTime and batch.endTime + betweenCastsTimeout or batch.startDeadline) then
+            Stop()
         end
     end
 
@@ -380,7 +366,9 @@ local function InstallCraftTimer(page, events, settings)
             bar:HookScript("OnShow", function()
                 if batch and batch.displayReady and not InCombatLockdown()
                     and (bar == PlayerCastingBarFrame or GetOverlayAnchor()) then
-                    SuppressBar(bar, suppressedBars)
+                    if not SuppressBar(bar, suppressedBars) then
+                        Stop()
+                    end
                 else
                     RestoreBar(bar)
                 end
@@ -395,33 +383,41 @@ local function InstallCraftTimer(page, events, settings)
     WatchNativeBar(PlayerCastingBarFrame)
     WatchNativeBar(OverlayPlayerCastingBarFrame)
 
-    events:SetScript("OnEvent", function(_frame, event, arg, _castGUID, spellID)
+    events:SetScript("OnEvent", function(_frame, event, arg, castID, spellID)
         if event == "PLAYER_REGEN_ENABLED" then
             RestoreBars()
             UpdateButtons()
-        elseif not batch then
-            if event == "UNIT_SPELLCAST_START" or event == "PLAYER_LEAVING_WORLD" then
-                RestoreBars()
-            end
-            return
         elseif event == "UNIT_SPELLCAST_START" or event == "UNIT_SPELLCAST_DELAYED" then
-            UpdateBatch()
-        elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-            if not InCombatLockdown() and not issecretvalue(spellID)
-                and spellID == batch.recipeID and batch.remaining == 0 then
-                batch.finished = true
-                ShowProgress(1, 0)
-            end
-        elseif event == "UNIT_SPELLCAST_FAILED" or event == "UNIT_SPELLCAST_INTERRUPTED" then
-            if issecretvalue(spellID) or spellID == batch.recipeID then
+            if batch then
+                UpdateBatch()
+            elseif event == "UNIT_SPELLCAST_START" then
                 Stop()
             end
-        elseif event == "UPDATE_TRADESKILL_CAST_STOPPED" then
-            if not issecretvalue(arg) and arg == false then
-                Stop(batch.finished)
-            end
-        else
+        elseif event == "TRADE_SKILL_CLOSE" or event == "TRADE_SKILL_DATA_SOURCE_CHANGING"
+            or event == "PLAYER_LEAVING_WORLD" or event == "PLAYER_REGEN_DISABLED"
+            or event == "UNIT_SPELLCAST_CHANNEL_START" or event == "UNIT_SPELLCAST_EMPOWER_START" then
             Stop()
+        elseif batch then
+            if event == "UPDATE_TRADESKILL_CAST_STOPPED" then
+                if not issecretvalue(arg) and arg == false then
+                    if batch.remaining == 0 then
+                        -- The stop notification can arrive before the final cast result.
+                        batch.stopDeadline = GetTime() + updateInterval
+                    else
+                        Stop()
+                    end
+                end
+            elseif issecretvalue(castID) or issecretvalue(spellID) then
+                Stop()
+            elseif spellID == batch.recipeID and (not batch.castID or castID == batch.castID) then
+                if event == "UNIT_SPELLCAST_SUCCEEDED" then
+                    if not InCombatLockdown() and batch.remaining == 0 then
+                        FinishBatch()
+                    end
+                else
+                    Stop()
+                end
+            end
         end
     end)
     for _, event in ipairs({ "TRADE_SKILL_CLOSE", "TRADE_SKILL_DATA_SOURCE_CHANGING",
@@ -429,6 +425,7 @@ local function InstallCraftTimer(page, events, settings)
         events:RegisterEvent(event)
     end
     for _, event in ipairs({ "UNIT_SPELLCAST_START", "UNIT_SPELLCAST_DELAYED",
+        "UNIT_SPELLCAST_CHANNEL_START", "UNIT_SPELLCAST_EMPOWER_START",
         "UNIT_SPELLCAST_FAILED", "UNIT_SPELLCAST_INTERRUPTED", "UNIT_SPELLCAST_SUCCEEDED" }) do
         events:RegisterUnitEvent(event, "player")
     end
