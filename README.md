@@ -18,3 +18,7 @@ A lightweight WoW: Forever QoL addon.
 ## Installation
 
 - Copy `UnifiedConveniences/` into `~/World of Warcraft/_forever_/Interface/AddOns/`
+
+## Known Bugs
+- Tooltip flicker when hovering over Questie icons.
+    - **Fix:** Reopen the map.
